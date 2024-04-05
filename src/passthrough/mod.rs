@@ -7,6 +7,7 @@ pub mod device_state;
 pub mod file_handle;
 pub mod inode_store;
 pub mod mount_fd;
+pub mod read_only;
 pub mod stat;
 pub mod util;
 pub mod xattrmap;
