@@ -21,6 +21,8 @@ use vhost::vhost_user::Error::Disconnected;
 use vhost::vhost_user::Listener;
 use vhost_user_backend::Error::HandleRequest;
 use vhost_user_backend::VhostUserDaemon;
+use virtiofsd::filesystem::{FileSystem, SerializableFileSystem};
+use virtiofsd::passthrough::read_only::PassthroughFsRo;
 use virtiofsd::passthrough::{
     self, CachePolicy, InodeFileHandlesMode, MigrationMode, MigrationOnError, PassthroughFs,
 };
@@ -153,6 +155,10 @@ struct Opt {
     /// Sandbox mechanism to isolate the daemon process (namespace, chroot, none)
     #[arg(long, default_value = "namespace")]
     sandbox: SandboxMode,
+
+    /// Prevent the guest from making modifications to the filesystem.
+    #[arg(long)]
+    readonly: bool,
 
     /// Action to take when seccomp finds a not allowed syscall (none, kill, log, trap)
     #[arg(long, value_parser = parse_seccomp, default_value = "kill")]
@@ -830,18 +836,32 @@ fn main() {
         drop_capabilities(fs_cfg.inode_file_handles, opt.modcaps);
     }
 
-    let fs = match PassthroughFs::new(fs_cfg) {
-        Ok(fs) => fs,
-        Err(e) => {
+    if opt.readonly {
+        let fs = PassthroughFsRo::new(fs_cfg).unwrap_or_else(|e| {
             error!("Failed to create internal filesystem representation: {e}");
             process::exit(1);
-        }
-    };
+        });
+        run_generic_fs(fs, listener, thread_pool_size, opt.tag);
+    } else {
+        let fs = PassthroughFs::new(fs_cfg).unwrap_or_else(|e| {
+            error!("Failed to create internal filesystem representation: {e}");
+            process::exit(1);
+        });
+        run_generic_fs(fs, listener, thread_pool_size, opt.tag);
+    }
+}
 
+// Use a generic function for the main loop so we don't need to use Box<dyn FileSystem>
+fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static>(
+    fs: F,
+    listener: Listener,
+    thread_pool_size: usize,
+    tag: Option<String>,
+) {
     let fs_backend = Arc::new(
         VhostUserFsBackendBuilder::default()
             .set_thread_pool_size(thread_pool_size)
-            .set_tag(opt.tag)
+            .set_tag(tag)
             .build(fs)
             .unwrap_or_else(|error| {
                 error!("Error creating vhost-user backend: {}", error);
