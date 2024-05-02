@@ -144,20 +144,7 @@ impl serialized::Inode {
                         self.id
                     )));
                 }
-
-                // We open the root node ourselves (from the configuration the user gave us)...
-                fs.open_root_node()?;
-                // ...and only take the refcount from the source, ignoring filename and parent
-                // information.  Note that we must not call `fs.open_root_node()` before we have
-                // the correct refcount, or deserializing child nodes (which drops one reference
-                // each) would quickly reduce the refcount below 0.
-                let root_data = fs.inodes.get(fuse::ROOT_ID).unwrap();
-                root_data.refcount.store(self.refcount, Ordering::Relaxed);
-
-                // For the root node, a non-matching file handle is always a hard error.  We cannot
-                // deserialize the root node as an invalid node.
-                self.check_file_handle(&root_data)?;
-
+                self.deserialize_root_node(fs)?;
                 Ok(true)
             }
 
@@ -226,6 +213,39 @@ impl serialized::Inode {
                 Ok(true)
             }
         }
+    }
+
+    /**
+     * “Deserialize” the root node.
+     *
+     * We will not get any information about it from the source because its location is always
+     * defined on the command line, so all we do is open that location and apply the refcount the
+     * source had for it.
+     *
+     * `self.id` must be the FUSE root inode ID.
+     */
+    fn deserialize_root_node(&self, fs: &PassthroughFs) -> io::Result<()> {
+        assert!(self.id == fuse::ROOT_ID);
+        if !matches!(&self.location, serialized::InodeLocation::RootNode) {
+            return Err(other_io_error(
+                "Root node has not been serialized as root node",
+            ));
+        }
+
+        // We open the root node ourselves (from the configuration the user gave us)...
+        fs.open_root_node()?;
+        // ...and only take the refcount from the source, ignoring filename and parent information.
+        // Note that we must not call `fs.open_root_node()` before we have the correct refcount, or
+        // deserializing child nodes (which drops one reference each) would quickly reduce the
+        // refcount below 0.
+        let root_data = fs.inodes.get(fuse::ROOT_ID).unwrap();
+        root_data.refcount.store(self.refcount, Ordering::Relaxed);
+
+        // For the root node, a non-matching file handle is always a hard error.  We cannot
+        // deserialize the root node as an invalid node.
+        self.check_file_handle(&root_data)?;
+
+        Ok(())
     }
 
     /// Helper function for `deserialize_with_fs()`: Try to locate an inode based on its parent
