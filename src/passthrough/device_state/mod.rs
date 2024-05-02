@@ -20,9 +20,9 @@ mod serialization;
 mod serialized;
 
 use crate::filesystem::SerializableFileSystem;
-use crate::passthrough::PassthroughFs;
-use preserialization::find_paths;
+use crate::passthrough::{MigrationMode, PassthroughFs};
 use preserialization::proc_paths::{self, ConfirmPaths, ImplicitPathCheck};
+use preserialization::{file_handles, find_paths};
 use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -40,12 +40,21 @@ impl SerializableFileSystem for PassthroughFs {
         // filesystem code makes an effort to set it (when the node is created).
         self.track_migration_info.store(true, Ordering::Relaxed);
 
-        // Create the reconstructor (which reconstructs parent+filename information for each node
-        // in our inode store), and run it.  Try the proc_paths module first, if that advises us to
-        // fall back, try find_paths second.
-        if proc_paths::Constructor::new(self, Arc::clone(&cancel)).execute() {
-            warn!("Falling back to iterating through the shared directory to reconstruct paths for migration");
-            find_paths::Constructor::new(self, Arc::clone(&cancel)).execute();
+        match self.cfg.migration_mode {
+            MigrationMode::FindPaths => {
+                // Create the reconstructor (which reconstructs parent+filename information for
+                // each node in our inode store), and run it.  Try the proc_paths module first, if
+                // that advises us to fall back, try find_paths second.
+                if proc_paths::Constructor::new(self, Arc::clone(&cancel)).execute() {
+                    warn!("Falling back to iterating through the shared directory to reconstruct paths for migration");
+                    find_paths::Constructor::new(self, Arc::clone(&cancel)).execute();
+                }
+            }
+
+            MigrationMode::FileHandles => {
+                // Get file handles for each node in our inode store
+                file_handles::Constructor::new(self, Arc::clone(&cancel)).execute();
+            }
         }
 
         // Check reconstructed paths once.  This is to rule out TOCTTOU problems, specifically the

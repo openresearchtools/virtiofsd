@@ -5,11 +5,13 @@
 use crate::passthrough::file_handle::{FileOrHandle, SerializableFileHandle};
 use crate::passthrough::inode_store::{InodeData, StrongInodeReference};
 use crate::passthrough::{self, MigrationMode};
+use crate::util::ResultErrorContext;
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fmt::{self, Display};
 use std::io;
 
+pub mod file_handles;
 pub mod find_paths;
 pub mod proc_paths;
 
@@ -34,6 +36,9 @@ pub(in crate::passthrough) enum InodeLocation {
     /// Inode is represented by its parent directory and its filename therein, allowing the
     /// destination to `openat(2)` it
     Path(find_paths::InodePath),
+
+    /// Inode is represented by its file handle
+    FileHandle(file_handles::FileHandle),
 }
 
 /// Precursor to `SerializableHandleRepresentation` that is constructed while serialization is
@@ -58,7 +63,17 @@ impl InodeMigrationInfo {
             MigrationMode::FindPaths => {
                 find_paths::InodePath::new_with_cstr(parent_ref, filename)?.into()
             }
-            MigrationMode::FileHandles => unreachable!(), // Cannot be constructed yet, but TODO
+
+            MigrationMode::FileHandles => {
+                let handle = file_or_handle.try_into().err_context(|| {
+                    format!(
+                        "(inode {})/{:?}: Failed to generate file handle",
+                        parent_ref.get().inode,
+                        filename,
+                    )
+                })?;
+                file_handles::FileHandle::new(handle).into()
+            }
         };
         Self::new_internal(fs_cfg, location, || file_or_handle.try_into())
     }
@@ -98,6 +113,7 @@ impl InodeMigrationInfo {
         match self.location {
             InodeLocation::RootNode => (),
             InodeLocation::Path(p) => p.for_each_strong_reference(f),
+            InodeLocation::FileHandle(fh) => fh.for_each_strong_reference(f),
         }
     }
 
@@ -112,6 +128,7 @@ impl InodeMigrationInfo {
         match &self.location {
             InodeLocation::RootNode => false,
             InodeLocation::Path(_) => true,
+            InodeLocation::FileHandle(_) => false,
         }
     }
 
@@ -126,6 +143,7 @@ impl InodeMigrationInfo {
         match &self.location {
             InodeLocation::RootNode => Ok(()),
             InodeLocation::Path(p) => p.check_presence(inode_data, self),
+            InodeLocation::FileHandle(_) => Ok(()),
         }
     }
 }
@@ -135,6 +153,7 @@ impl Display for InodeLocation {
         match self {
             InodeLocation::RootNode => write!(f, "[shared directory root]"),
             InodeLocation::Path(p) => write!(f, "{p}"),
+            InodeLocation::FileHandle(fh) => write!(f, "{fh}"),
         }
     }
 }

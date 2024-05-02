@@ -191,6 +191,12 @@ impl InodeMigrationInfo {
 
                 serialized::InodeLocation::Path { parent, filename }
             }
+
+            preserialization::InodeLocation::FileHandle(
+                preserialization::file_handles::FileHandle { handle },
+            ) => serialized::InodeLocation::FileHandle {
+                handle: handle.clone(),
+            },
         })
     }
 }

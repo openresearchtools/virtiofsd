@@ -935,6 +935,12 @@ struct Opt {
     ///   /proc/self/fd first; if that does not work, we will fall back to iterating through the
     ///   shared directory (exhaustive search), enumerating all paths within.
     ///
+    /// - file-handles: Pass file handles.  For this to work, source and destination instance must
+    ///   operate on exactly the same shared directory on the same filesystem (which may be a
+    ///   network filesystem, mounted on different hosts).  The destination instance must have the
+    ///   capability to open file handles, i.e. CAP_DAC_READ_SEARCH -- generally, this requires
+    ///   running virtiofsd as root and use `--modcaps=+dac_read_search`.
+    ///
     /// This parameter is ignored on the destination side.
     #[arg(long = "migration-mode", default_value = "find-paths")]
     migration_mode: MigrationMode,

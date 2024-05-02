@@ -196,6 +196,7 @@ impl FromStr for MigrationMode {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "find-paths" => Ok(MigrationMode::FindPaths),
+            "file-handles" => Ok(MigrationMode::FileHandles),
 
             _ => Err("invalid migration-mode value"),
         }
@@ -474,7 +475,9 @@ impl PassthroughFs {
             libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )?;
 
-        let mount_fds = if cfg.inode_file_handles == InodeFileHandlesMode::Never {
+        let mount_fds = if cfg.inode_file_handles == InodeFileHandlesMode::Never
+            && cfg.migration_mode != MigrationMode::FileHandles
+        {
             None
         } else {
             let mountinfo_fd = if let Some(fd) = cfg.proc_mountinfo_rawfd.take() {

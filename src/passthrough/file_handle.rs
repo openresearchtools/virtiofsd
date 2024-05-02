@@ -8,6 +8,7 @@ use crate::passthrough::stat::MountId;
 use serde::{Deserialize, Serialize};
 use std::convert::{TryFrom, TryInto};
 use std::ffi::CStr;
+use std::fmt::{self, Display};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -236,5 +237,19 @@ impl TryFrom<&FileOrHandle> for SerializableFileHandle {
             }
             FileOrHandle::Invalid(err) => Err(io::Error::new(err.kind(), Arc::clone(err))),
         }
+    }
+}
+
+impl Display for SerializableFileHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "mount_id={}, handle_type=0x{:x}, handle=",
+            self.mnt_id, self.handle_type
+        )?;
+        for byte in &self.handle {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
