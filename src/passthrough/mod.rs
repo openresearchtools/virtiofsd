@@ -1244,13 +1244,24 @@ impl PassthroughFs {
         parent_data: Arc<InodeData>,
         filename: &CStr,
     ) -> io::Result<()> {
+        if !self.track_migration_info.load(Ordering::Relaxed) {
+            // Not preparing for migration?  Nothing to do.
+            return Ok(());
+        }
+
         // We only need to update the node's migration info if we have it in our store
         if let Some(inode) = self.try_lookup(&parent_data, filename)? {
             let inode_data = inode.get();
             let parent_strong_ref = StrongInodeReference::new_with_data(parent_data, &self.inodes)?;
             let mut info_locked = inode_data.migration_info.lock().unwrap();
             // Unconditionally clear any potentially existing path, because it will be outdated
-            info_locked.take();
+            if let Some(info) = info_locked.take() {
+                if !info.has_path() {
+                    // We have some migration info, but it is not path-based?  Keep it then.
+                    *info_locked = Some(info);
+                    return Ok(());
+                }
+            }
             *info_locked = Some(InodeMigrationInfo::new(
                 &self.cfg,
                 parent_strong_ref,
@@ -1857,15 +1868,11 @@ impl FileSystem for PassthroughFs {
             return Err(io::Error::last_os_error());
         }
 
-        if self.track_migration_info.load(Ordering::Relaxed) {
-            // When preparing for migration, we need to tell the migration code that this node has
-            // been renamed, which might need to be reflected in the migration info
-            if let Err(err) = self.update_inode_migration_info(new_inode, newname) {
-                warn!(
-                    "Failed to update renamed file's ({oldname:?} -> {newname:?}) migration info, \
-                    the migration destination may be unable to find it: {err}",
-                );
-            }
+        if let Err(err) = self.update_inode_migration_info(new_inode, newname) {
+            warn!(
+                "Failed to update renamed file's ({oldname:?} -> {newname:?}) migration info, \
+                the migration destination may be unable to find it: {err}",
+            );
         }
 
         Ok(())

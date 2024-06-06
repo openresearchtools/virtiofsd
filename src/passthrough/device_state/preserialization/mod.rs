@@ -97,6 +97,20 @@ impl InodeMigrationInfo {
             InodeLocation::Path(p) => p.for_each_strong_reference(f),
         }
     }
+
+    /**
+     * Return `true` if this migration info contains a path.
+     *
+     * If so, when the associated inode’s path is modified or invalidated (e.g. renamed, moved,
+     * unlinked), its migration info must then be updated or invalidated accordingly.
+     */
+    pub fn has_path(&self) -> bool {
+        // Use `match` instead of `matches!()` so we don’t forget any potential future variants
+        match &self.location {
+            InodeLocation::RootNode => false,
+            InodeLocation::Path(_) => true,
+        }
+    }
 }
 
 impl HandleMigrationInfo {
