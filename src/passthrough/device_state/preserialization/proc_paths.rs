@@ -234,7 +234,7 @@ impl<'a> Walker<'a> {
  * Note that this is decidedly not a method of `Walker` so that we can easily reuse it in other
  * places; specifically, to re-establish a path for inodes that have been potentially invalidated.
  */
-fn set_path_migration_info_from_proc_self_fd(
+pub(in crate::passthrough) fn set_path_migration_info_from_proc_self_fd(
     inode_data: &InodeData,
     fs: &PassthroughFs,
     shared_dir_path: &CStr,
