@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::fs_cache_req_handler::FsCacheReqHandler;
 use crate::descriptor_utils::{Reader, Writer};
 use crate::filesystem::{
     Context, DirEntry, DirectoryIterator, Entry, Extensions, FileSystem, GetxattrReply,
@@ -80,7 +79,7 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     #[allow(clippy::cognitive_complexity)]
-    pub fn handle_message<T: FsCacheReqHandler>(
+    pub fn handle_message<T>(
         &self,
         mut r: Reader,
         w: Writer,
@@ -165,92 +164,32 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
-    fn setupmapping<T: FsCacheReqHandler>(
+    fn setupmapping<T>(
         &self,
         in_header: InHeader,
-        mut r: Reader,
+        _r: Reader,
         w: Writer,
-        vu_req: Option<&mut T>,
+        _vu_req: Option<&mut T>,
     ) -> Result<usize> {
-        if let Some(req) = vu_req {
-            let SetupmappingIn {
-                fh,
-                foffset,
-                len,
-                flags,
-                moffset,
-            } = r.read_obj().map_err(Error::DecodeMessage)?;
-
-            match self.fs.setupmapping(
-                Context::from(in_header),
-                in_header.nodeid.into(),
-                fh.into(),
-                foffset,
-                len,
-                flags,
-                moffset,
-                req,
-            ) {
-                Ok(()) => reply_ok(None::<u8>, None, in_header.unique, w),
-                Err(e) => reply_error(e, in_header.unique, w),
-            }
-        } else {
-            reply_error(
-                io::Error::from_raw_os_error(libc::EINVAL),
-                in_header.unique,
-                w,
-            )
-        }
+        reply_error(
+            io::Error::from_raw_os_error(libc::ENOSYS),
+            in_header.unique,
+            w,
+        )
     }
 
-    fn removemapping<T: FsCacheReqHandler>(
+    fn removemapping<T>(
         &self,
         in_header: InHeader,
-        mut r: Reader,
+        _r: Reader,
         w: Writer,
-        vu_req: Option<&mut T>,
+        _vu_req: Option<&mut T>,
     ) -> Result<usize> {
-        if let Some(req) = vu_req {
-            let RemovemappingIn { count } = r.read_obj().map_err(Error::DecodeMessage)?;
-
-            if let Some(size) = (count as usize).checked_mul(size_of::<RemovemappingOne>()) {
-                if size > MAX_BUFFER_SIZE as usize {
-                    return reply_error(
-                        io::Error::from_raw_os_error(libc::ENOMEM),
-                        in_header.unique,
-                        w,
-                    );
-                }
-            } else {
-                return reply_error(
-                    io::Error::from_raw_os_error(libc::EOVERFLOW),
-                    in_header.unique,
-                    w,
-                );
-            }
-
-            let mut requests = Vec::with_capacity(count as usize);
-            for _ in 0..count {
-                requests.push(
-                    r.read_obj::<RemovemappingOne>()
-                        .map_err(Error::DecodeMessage)?,
-                );
-            }
-
-            match self
-                .fs
-                .removemapping(Context::from(in_header), requests, req)
-            {
-                Ok(()) => reply_ok(None::<u8>, None, in_header.unique, w),
-                Err(e) => reply_error(e, in_header.unique, w),
-            }
-        } else {
-            reply_error(
-                io::Error::from_raw_os_error(libc::EINVAL),
-                in_header.unique,
-                w,
-            )
-        }
+        reply_error(
+            io::Error::from_raw_os_error(libc::ENOSYS),
+            in_header.unique,
+            w,
+        )
     }
 
     fn lookup(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
