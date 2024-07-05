@@ -5,14 +5,14 @@
 use super::{InodeLocation, InodeMigrationInfo};
 use crate::filesystem::DirectoryIterator;
 use crate::fuse;
-use crate::passthrough::file_handle::FileHandle;
+use crate::passthrough::file_handle::{FileHandle, SerializableFileHandle};
 use crate::passthrough::inode_store::{InodeData, InodeIds, StrongInodeReference};
 use crate::passthrough::stat::statx;
 use crate::passthrough::{FileOrHandle, PassthroughFs};
 use crate::read_dir::ReadDir;
-use crate::util::other_io_error;
-use std::convert::TryInto;
-use std::ffi::CStr;
+use crate::util::{other_io_error, ResultErrorContext};
+use std::convert::{TryFrom, TryInto};
+use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -52,6 +52,56 @@ impl InodePath {
 
     pub(super) fn for_each_strong_reference<F: FnMut(StrongInodeReference)>(self, mut f: F) {
         f(self.parent);
+    }
+
+    /// Checker whether the associated inode (`inode_data`) is present under this path, returning
+    /// an error if (and only if) it is not.
+    pub(in crate::passthrough::device_state) fn check_presence(
+        &self,
+        inode_data: &InodeData,
+        full_info: &InodeMigrationInfo,
+    ) -> io::Result<()> {
+        let filename = CString::new(self.filename.clone())?;
+        let parent_fd = self.parent.get().get_file()?;
+        let st = statx(&parent_fd, Some(&filename))?;
+
+        if st.st.st_dev != inode_data.ids.dev {
+            return Err(other_io_error(format!(
+                "Device ID differs: Expected {}, found {}",
+                inode_data.ids.dev, st.st.st_dev
+            )));
+        }
+
+        // Try to take a file handle from the migration info; if none is there, try to generate it
+        // (but ignore errors, falling back to checking the inode ID).  We do really want to check
+        // the file handle if possible, though, to detect inode ID reuse.
+        let (fh, fh_ref) = if let Some(fh_ref) = full_info.file_handle.as_ref() {
+            (None, Some(fh_ref))
+        } else if let Ok(fh) = SerializableFileHandle::try_from(&inode_data.file_or_handle) {
+            (Some(fh), None)
+        } else {
+            (None, None)
+        };
+        if let Some(fh) = fh_ref.or(fh.as_ref()) {
+            // If we got a file handle for `inode_data`, failing to get it for `filename` probably
+            // means it is a different inode.  Be cautious and return an error then.
+            let actual_fh = FileHandle::from_name_at_fail_hard(&parent_fd, &filename)
+                .err_context(|| "Failed to generate file handle")?;
+            // Ignore mount ID: A file handle can be in two different mount IDs, but as long as it
+            // is on the same device, it is still the same mount ID; and we have already checked
+            // the device ID.
+            fh.require_equal_without_mount_id(&actual_fh.into())
+                .map_err(other_io_error)
+        } else {
+            // Cannot generate file handle?  Fall back to just the inode ID.
+            if st.st.st_ino != inode_data.ids.ino {
+                return Err(other_io_error(format!(
+                    "Inode ID differs: Expected {}, found {}",
+                    inode_data.ids.ino, st.st.st_ino
+                )));
+            }
+            Ok(())
+        }
     }
 }
 

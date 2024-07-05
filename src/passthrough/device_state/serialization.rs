@@ -13,9 +13,7 @@ use crate::passthrough::device_state::preserialization::{
     self, HandleMigrationInfo, InodeMigrationInfo,
 };
 use crate::passthrough::device_state::serialized;
-use crate::passthrough::file_handle::{FileHandle, SerializableFileHandle};
 use crate::passthrough::inode_store::InodeData;
-use crate::passthrough::stat::statx;
 use crate::passthrough::util::relative_path;
 use crate::passthrough::{Handle, HandleData, PassthroughFs};
 use crate::util::{other_io_error, ResultErrorContext};
@@ -169,12 +167,11 @@ impl InodeMigrationInfo {
         Ok(match &self.location {
             preserialization::InodeLocation::RootNode => serialized::InodeLocation::RootNode,
 
-            preserialization::InodeLocation::Path(preserialization::find_paths::InodePath {
-                parent,
-                filename,
-            }) => {
+            preserialization::InodeLocation::Path(inode_path) => {
+                let preserialization::find_paths::InodePath { parent, filename } = inode_path;
+
                 if fs.cfg.migration_confirm_paths {
-                    if let Err(err) = self.check_presence(inode_data, parent.get(), filename) {
+                    if let Err(err) = inode_path.check_presence(inode_data, self) {
                         warn!(
                             "Lost inode {} (former location: {}): {}; looking it up through /proc/self/fd",
                             inode_data.inode, filename, err
@@ -200,57 +197,6 @@ impl InodeMigrationInfo {
                 serialized::InodeLocation::Path { parent, filename }
             }
         })
-    }
-
-    /// Check whether the given `inode_data` from our inode store can be found at the given location
-    /// (i.e. `filename` under parent directory `parent`)
-    fn check_presence(
-        &self,
-        inode_data: &InodeData,
-        parent: &InodeData,
-        filename: &str,
-    ) -> io::Result<()> {
-        let filename = CString::new(filename)?;
-        let parent_fd = parent.get_file()?;
-        let st = statx(&parent_fd, Some(&filename))?;
-
-        if st.st.st_dev != inode_data.ids.dev {
-            return Err(other_io_error(format!(
-                "Device ID differs: Expected {}, found {}",
-                inode_data.ids.dev, st.st.st_dev
-            )));
-        }
-
-        // Try to take a file handle from `self.file_handle`; if none is there, try to generate it
-        // (but ignore errors, falling back to checking the inode ID).  We do really want to check
-        // the file handle if possible, though, to detect inode ID reuse.
-        let (fh, fh_ref) = if let Some(fh_ref) = self.file_handle.as_ref() {
-            (None, Some(fh_ref))
-        } else if let Ok(fh) = SerializableFileHandle::try_from(&inode_data.file_or_handle) {
-            (Some(fh), None)
-        } else {
-            (None, None)
-        };
-        if let Some(fh) = fh_ref.or(fh.as_ref()) {
-            // If we got a file handle for `inode_data`, failing to get it for `filename` probably
-            // means it is a different inode.  Be cautious and return an error then.
-            let actual_fh = FileHandle::from_name_at_fail_hard(&parent_fd, &filename)
-                .err_context(|| "Failed to generate file handle")?;
-            // Ignore mount ID: A file handle can be in two different mount IDs, but as long as it
-            // is on the same device, it is still the same mount ID; and we have already checked
-            // the device ID.
-            fh.require_equal_without_mount_id(&actual_fh.into())
-                .map_err(other_io_error)
-        } else {
-            // Cannot generate file handle?  Fall back to just the inode ID.
-            if st.st.st_ino != inode_data.ids.ino {
-                return Err(other_io_error(format!(
-                    "Inode ID differs: Expected {}, found {}",
-                    inode_data.ids.ino, st.st.st_ino
-                )));
-            }
-            Ok(())
-        }
     }
 
     /// Retrieve the inode's path relative to the shared directory from /proc/self/fd
@@ -282,10 +228,12 @@ impl InodeMigrationInfo {
             .map_err(|err| other_io_error(format!("Path {path:?} is not a UTF-8 string: {err}")))?
             .to_string();
 
-        self.check_presence(inode_data, shared_dir, &relative_path)
-            .map_err(|err| {
-                io::Error::new(err.kind(), format!("Inode not found at {path:?}: {err}"))
-            })?;
+        preserialization::find_paths::InodePath {
+            parent: fs.inodes.get_strong(shared_dir.inode).unwrap(),
+            filename: relative_path.clone(),
+        }
+        .check_presence(inode_data, self)
+        .map_err(|err| io::Error::new(err.kind(), format!("Inode not found at {path:?}: {err}")))?;
 
         Ok(relative_path)
     }
