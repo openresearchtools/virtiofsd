@@ -22,7 +22,7 @@ mod serialized;
 use crate::filesystem::SerializableFileSystem;
 use crate::passthrough::PassthroughFs;
 use preserialization::find_paths;
-use preserialization::proc_paths::ConfirmPaths;
+use preserialization::proc_paths::{ConfirmPaths, ImplicitPathCheck};
 use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -42,8 +42,20 @@ impl SerializableFileSystem for PassthroughFs {
 
         // Create the reconstructor (which reconstructs parent+filename information for each node
         // in our inode store), and run it
-        let reconstructor = find_paths::Constructor::new(self, cancel);
+        let reconstructor = find_paths::Constructor::new(self, Arc::clone(&cancel));
         reconstructor.execute();
+
+        // Check reconstructed paths once.  This is to rule out TOCTTOU problems, specifically the
+        // following:
+        // 1. Our preserialization constructor above finds a path for some inode
+        // 2. That inode is concurrently unlinked by the guest, so its inode migration info is
+        //    invalidated
+        // 3. The preserialization constructor then constructs an inode migration info with the
+        //    path it found (that is now wrong), adding it to the inode
+        // To fix this problem, preserialization must re-check each path after putting it into the
+        // `InodeData.migration_info` field.  Do that by running the proc_paths checker.
+        let checker = ImplicitPathCheck::new(self, cancel);
+        checker.check_paths();
     }
 
     fn serialize(&self, mut state_pipe: File) -> io::Result<()> {

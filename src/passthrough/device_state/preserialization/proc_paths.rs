@@ -21,6 +21,8 @@ use crate::util::{other_io_error, ResultErrorContext};
 use std::ffi::{CStr, CString};
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /**
  * Provides all core functionality.
@@ -38,6 +40,8 @@ struct Walker<'a> {
     /// Specifies which functionality we are supposed to provide
     #[allow(dead_code)] // will be used once we provide more than one mode
     mode: Mode,
+    /// Optional: Cancel early
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 /**
@@ -54,17 +58,36 @@ pub(in crate::passthrough::device_state) struct ConfirmPaths<'a> {
     walker: Walker<'a>,
 }
 
+/**
+ * Double-check inodes’ paths after preserialization.
+ *
+ * Similar to `ConfirmPaths`, but is an implicit double-check run after the first preserialization
+ * phase, and as a result, is more relaxed:
+ * - On a fundamental unrecoverable error (e.g. failing to find the shared directory’s base path),
+ *   printing a warning an skipping the whole run is OK
+ * - We only need to find new paths for inodes that have a path in their migration info when we
+ *   found that path to be incorrect.  No need to try to find paths for inodes that don’t have any
+ *   migration info attached to them.
+ */
+pub(in crate::passthrough::device_state) struct ImplicitPathCheck<'a> {
+    /// `Walker` in `Mode::ImplicitPathCheck` mode.
+    walker: Walker<'a>,
+}
+
 /// Selects how a `Walker` should behave.
-enum Mode {
+pub(in crate::passthrough::device_state) enum Mode {
     /// Run the `--migration-confirm-paths` check.
     ConfirmPaths,
+
+    /// Double-check inodes’ paths after preserialization.
+    ImplicitPathCheck,
 }
 
 impl<'a> ConfirmPaths<'a> {
     /// Prepare to confirm paths collected for `fs`.
     pub fn new(fs: &'a PassthroughFs) -> Self {
         ConfirmPaths {
-            walker: Walker::new(fs, Mode::ConfirmPaths),
+            walker: Walker::new(fs, Mode::ConfirmPaths, None),
         }
     }
 
@@ -79,10 +102,36 @@ impl<'a> ConfirmPaths<'a> {
     }
 }
 
+impl<'a> ImplicitPathCheck<'a> {
+    /// Prepare to double-check paths during preserialization.
+    pub fn new(fs: &'a PassthroughFs, cancel: Arc<AtomicBool>) -> Self {
+        ImplicitPathCheck {
+            walker: Walker::new(fs, Mode::ImplicitPathCheck, Some(cancel)),
+        }
+    }
+
+    /**
+     * Double-check inodes’ paths after preserialization.
+     *
+     * Try to fix any paths that are wrong (by getting new paths from /proc/self/fd), but do not
+     * return errors: This check is implicit, not requested by the user, so should be infallible,
+     * not cancelling migration on error.
+     */
+    pub fn check_paths(self) {
+        if let Err(err) = self.walker.run() {
+            warn!("Double-check of all inode paths collected for migration failed: {err}")
+        }
+    }
+}
+
 impl<'a> Walker<'a> {
-    /// Create a `Walker` over `fs` with the given `mode`.
-    fn new(fs: &'a PassthroughFs, mode: Mode) -> Self {
-        Walker { fs, mode }
+    /**
+     * Create a `Walker` over `fs` with the given `mode`.
+     *
+     * If `cancel` is given, the operation will be cancelled when it is found to be set.
+     */
+    fn new(fs: &'a PassthroughFs, mode: Mode, cancel: Option<Arc<AtomicBool>>) -> Self {
+        Walker { fs, mode, cancel }
     }
 
     /**
@@ -106,17 +155,24 @@ impl<'a> Walker<'a> {
             .err_context(|| "Failed to get shared directory's path")?;
 
         for inode_data in self.fs.inodes.iter() {
+            if self
+                .cancel
+                .as_ref()
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
+                break;
+            }
+
             if !self.should_update_inode(&inode_data) {
                 continue;
             }
 
             let set_path_result =
                 set_path_migration_info_from_proc_self_fd(&inode_data, self.fs, &shared_dir_path);
-            // (Note: Matching `self.mode` may look strange as there is only one mode now, but
-            // there will be more later.)
             match self.mode {
                 // In check modes, we note inodes we found, and log all errors
-                Mode::ConfirmPaths => {
+                Mode::ConfirmPaths | Mode::ImplicitPathCheck => {
                     if let Err(err) = set_path_result {
                         error!("Inode {}: {}", inode_data.inode, err);
                     } else if let Some(new_info) =
@@ -139,16 +195,18 @@ impl<'a> Walker<'a> {
      */
     fn should_update_inode(&self, inode_data: &InodeData) -> bool {
         let mut migration_info_locked = inode_data.migration_info.lock().unwrap();
-        // (Note: Matching `self.mode` may look strange as there is only one mode now, but there
-        // will be more later.)
         match (&self.mode, migration_info_locked.as_ref()) {
+            // Do not touch inodes without migration info in the implicit/lax check mode
+            (Mode::ImplicitPathCheck, None) => false,
+
             // In the explicit check mode, give migration info to those inodes that don’t already
             // have it
             (Mode::ConfirmPaths, None) => true,
 
-            // In a check mode, when there is pre-existing migration info, we have to check its
+            // In both check modes, when there is pre-existing migration info, we have to check its
             // path; update those we find to be incorrect
-            (Mode::ConfirmPaths, Some(migration_info)) => {
+            (Mode::ConfirmPaths, Some(migration_info))
+            | (Mode::ImplicitPathCheck, Some(migration_info)) => {
                 if let Err(err) = migration_info.check_path_presence(inode_data) {
                     // Migration info is wrong, clear it unconditionally, regardless of whether we
                     // can find a better one
