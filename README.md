@@ -332,6 +332,9 @@ Defines how to perform migration, i.e. how to represent the internal state to th
 instance, and how to obtain that representation.  Note that (when using QEMU) **QEMU version 8.2**
 or newer is required to use virtio-fs migration.
 
+See **doc/migration.md** for a comprehensive explanation on how virtio-fs migration works, what its
+limitations are, and what configurations we recommend.
+
 virtiofsd internally holds references to all inodes indexed or opened by the guest.  During
 migration, these references need to be transferred to the destination; how that is done is
 determined with this switch:
