@@ -9,6 +9,7 @@ use crate::filesystem::{
 };
 use crate::fuse::*;
 use crate::passthrough::util::einval;
+use crate::soft_idmap::GuestGid;
 use crate::{oslib, Error, Result};
 use std::convert::{TryFrom, TryInto};
 use std::ffi::{CStr, CString};
@@ -1675,7 +1676,7 @@ fn parse_security_context(nr_secctx: u32, data: &[u8]) -> Result<Option<SecConte
     Ok(Some(fuse_secctx))
 }
 
-fn parse_sup_groups(data: &[u8]) -> Result<u32> {
+fn parse_sup_groups(data: &[u8]) -> Result<GuestGid> {
     let (group_header, group_id_bytes) = take_object::<SuppGroups>(data)?;
 
     // The FUSE extension allows sending several group IDs, but currently the guest
@@ -1685,7 +1686,7 @@ fn parse_sup_groups(data: &[u8]) -> Result<u32> {
     }
 
     let (gid, _) = take_object::<u32>(group_id_bytes)?;
-    Ok(gid)
+    Ok(gid.into())
 }
 
 fn get_extensions(options: FsOptions, skip: usize, request_bytes: &[u8]) -> Result<Extensions> {

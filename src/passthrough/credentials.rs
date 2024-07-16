@@ -2,17 +2,18 @@
 
 use crate::oslib;
 use crate::passthrough::util::einval;
+use crate::soft_idmap::{HostGid, HostUid, Id};
 use std::io;
 
 pub struct UnixCredentials {
-    uid: libc::uid_t,
-    gid: libc::gid_t,
-    sup_gid: Option<u32>,
+    uid: HostUid,
+    gid: HostGid,
+    sup_gid: Option<HostGid>,
     keep_capability: bool,
 }
 
 impl UnixCredentials {
-    pub fn new(uid: libc::uid_t, gid: libc::gid_t) -> Self {
+    pub fn new(uid: HostUid, gid: HostGid) -> Self {
         UnixCredentials {
             uid,
             gid,
@@ -24,7 +25,7 @@ impl UnixCredentials {
     /// Set a supplementary group. Set `supported_extension` to `false` to signal that a
     /// supplementary group maybe required, but the guest was not able to tell us which,
     /// so we have to rely on keeping the DAC_OVERRIDE capability.
-    pub fn supplementary_gid(self, supported_extension: bool, sup_gid: Option<u32>) -> Self {
+    pub fn supplementary_gid(self, supported_extension: bool, sup_gid: Option<HostGid>) -> Self {
         UnixCredentials {
             uid: self.uid,
             gid: self.gid,
@@ -37,13 +38,13 @@ impl UnixCredentials {
     /// the thread's credentials back to root when the returned struct is dropped.
     pub fn set(self) -> io::Result<Option<UnixCredentialsGuard>> {
         // Safe: Always succesful
-        let current_uid = unsafe { libc::geteuid() };
-        let current_gid = unsafe { libc::getegid() };
+        let current_uid = HostUid::from(unsafe { libc::geteuid() });
+        let current_gid = HostGid::from(unsafe { libc::getegid() });
 
         // Not to change UID/GID when they’re 0 (root) is legacy behavior that we’re afraid to
         // change
-        let change_uid = self.uid != 0 && self.uid != current_uid;
-        let change_gid = self.gid != 0 && self.gid != current_gid;
+        let change_uid = !self.uid.is_root() && self.uid != current_uid;
+        let change_gid = !self.gid.is_root() && self.gid != current_gid;
 
         // We have to change the gid before we change the uid because if we
         // change the uid first then we lose the capability to change the gid.
@@ -85,8 +86,8 @@ impl UnixCredentials {
 }
 
 pub struct UnixCredentialsGuard {
-    reset_uid: Option<libc::uid_t>,
-    reset_gid: Option<libc::gid_t>,
+    reset_uid: Option<HostUid>,
+    reset_gid: Option<HostGid>,
     drop_sup_gid: bool,
 }
 

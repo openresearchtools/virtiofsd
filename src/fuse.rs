@@ -5,6 +5,7 @@
 use std::convert::TryFrom;
 
 use crate::macros::enum_value;
+use crate::soft_idmap::{GuestGid, GuestUid, HostGid, HostId, HostUid};
 use bitflags::bitflags;
 use vm_memory::ByteValued;
 
@@ -593,8 +594,8 @@ pub struct Attr {
     pub ctimensec: u32,
     pub mode: u32,
     pub nlink: u32,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: GuestUid,
+    pub gid: GuestGid,
     pub rdev: u32,
     pub blksize: u32,
     pub flags: u32,
@@ -621,8 +622,8 @@ impl Attr {
             ctimensec: st.st_ctime_nsec as u32,
             mode: st.st_mode,
             nlink: st.st_nlink as u32,
-            uid: st.st_uid,
-            gid: st.st_gid,
+            uid: HostUid::from(st.st_uid).id_mapped(),
+            gid: HostGid::from(st.st_gid).id_mapped(),
             rdev: st.st_rdev as u32,
             blksize: st.st_blksize as u32,
             flags,
@@ -851,8 +852,8 @@ pub struct SetattrIn {
     pub ctimensec: u32,
     pub mode: u32,
     pub unused4: u32,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: GuestUid,
+    pub gid: GuestGid,
     pub unused5: u32,
 }
 unsafe impl ByteValued for SetattrIn {}
@@ -1146,8 +1147,8 @@ pub struct InHeader {
     pub opcode: u32,
     pub unique: u64,
     pub nodeid: u64,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: GuestUid,
+    pub gid: GuestGid,
     pub pid: u32,
     pub total_extlen: u16, // length of extensions in 8-byte units
     pub padding: u16,
@@ -1399,7 +1400,7 @@ unsafe impl ByteValued for SecctxHeader {}
 #[derive(Debug, Default, Copy, Clone)]
 pub struct SuppGroups {
     pub nr_groups: u32,
-    // uint32_t	groups[];
+    // groups: [GuestGid];
 }
 
 unsafe impl ByteValued for SuppGroups {}

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{io, mem};
 
+use crate::soft_idmap::{GuestGid, GuestUid};
 use crate::{fuse, oslib};
 
 pub use fuse::{FsOptions, OpenOptions, RemovemappingOne, SetattrValid, SetxattrFlags, ROOT_ID};
@@ -328,10 +329,10 @@ impl<W: ZeroCopyWriter> ZeroCopyWriter for &mut W {
 #[derive(Clone, Copy, Debug)]
 pub struct Context {
     /// The user ID of the calling process.
-    pub uid: libc::uid_t,
+    pub uid: GuestUid,
 
     /// The group ID of the calling process.
-    pub gid: libc::gid_t,
+    pub gid: GuestGid,
 
     /// The thread group ID of the calling process.
     pub pid: libc::pid_t,
@@ -351,7 +352,7 @@ impl From<fuse::InHeader> for Context {
 #[derive(Clone, Default, Debug)]
 pub struct Extensions {
     pub secctx: Option<SecContext>,
-    pub sup_gid: Option<u32>,
+    pub sup_gid: Option<GuestGid>,
 }
 
 /// Additional security context associated with requests.
