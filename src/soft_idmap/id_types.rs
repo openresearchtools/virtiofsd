@@ -11,6 +11,7 @@
  * types.
  */
 
+use btree_range_map::{Measure, PartialEnum, RangePartialOrd};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::ops::{Add, Sub};
 
@@ -45,9 +46,10 @@ pub trait Id:
     /**
      * Inner raw numerical type.
      *
-     * Should be a primitive integer.
+     * Should be a primitive integer.  `Range<Self::Inner>` must be usable as the key for a
+     * `btree_range_map::RangeMap`, hence the additional dependencies beyond `Clone + Copy`.
      */
-    type Inner: Clone + Copy;
+    type Inner: Clone + Copy + Measure + PartialEnum + RangePartialOrd;
 
     /// Is this a root UID/GID?
     fn is_root(&self) -> bool;
