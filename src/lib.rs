@@ -19,6 +19,7 @@ pub mod sandbox;
 #[cfg(feature = "seccomp")]
 pub mod seccomp;
 pub mod server;
+pub mod soft_idmap;
 pub mod util;
 pub mod vhost_user;
 
