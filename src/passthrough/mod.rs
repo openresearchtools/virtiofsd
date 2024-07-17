@@ -24,7 +24,7 @@ use crate::passthrough::inode_store::{
 };
 use crate::passthrough::util::{ebadf, is_safe_inode, openat, reopen_fd_through_proc};
 use crate::read_dir::ReadDir;
-use crate::soft_idmap::{GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
+use crate::soft_idmap::{self, GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
 use crate::util::{other_io_error, ResultErrorContext};
 use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
@@ -32,6 +32,7 @@ use mount_fd::{MPRError, MountFds};
 use stat::{statx, StatExt};
 use std::borrow::Cow;
 use std::collections::{btree_map, BTreeMap};
+use std::convert::TryInto;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
@@ -368,6 +369,20 @@ pub struct Config {
     ///
     /// The default is `FindPaths`.
     pub migration_mode: MigrationMode,
+
+    /**
+     * UID map parameters given on the command line.
+     *
+     * Is `take()`n when `PassthroughFs` is created, i.e. `None` during runtime.
+     */
+    pub uid_map: Option<Vec<soft_idmap::cmdline::IdMap>>,
+
+    /**
+     * GID map parameters given on the command line.
+     *
+     * Is `take()`n when `PassthroughFs` is created, i.e. `None` during runtime.
+     */
+    pub gid_map: Option<Vec<soft_idmap::cmdline::IdMap>>,
 }
 
 impl Default for Config {
@@ -397,6 +412,8 @@ impl Default for Config {
             migration_verify_handles: false,
             migration_confirm_paths: false,
             migration_mode: MigrationMode::FindPaths,
+            uid_map: None,
+            gid_map: None,
         }
     }
 }
@@ -498,6 +515,18 @@ impl PassthroughFs {
             Some(MountFds::new(mountinfo_fd, cfg.mountinfo_prefix.clone()))
         };
 
+        let uid_map = if let Some(map) = cfg.uid_map.take() {
+            map.try_into().err_context(|| "UID map")?
+        } else {
+            IdMap::empty()
+        };
+
+        let gid_map = if let Some(map) = cfg.gid_map.take() {
+            map.try_into().err_context(|| "GID map")?
+        } else {
+            IdMap::empty()
+        };
+
         let mut fs = PassthroughFs {
             inodes: Default::default(),
             next_inode: AtomicU64::new(fuse::ROOT_ID + 1),
@@ -513,8 +542,8 @@ impl PassthroughFs {
             os_facts: oslib::OsFacts::new(),
             track_migration_info: AtomicBool::new(false),
             cfg,
-            uid_map: IdMap::empty(),
-            gid_map: IdMap::empty(),
+            uid_map,
+            gid_map,
         };
 
         // Check to see if the client remapped "security.capability", if so,

@@ -9,10 +9,13 @@
  * translation functions in either direction.
  */
 
+pub mod cmdline;
 pub mod id_types;
 
+use crate::util::{other_io_error, ResultErrorContext};
 use btree_range_map::RangeMap;
 pub use id_types::{GuestGid, GuestId, GuestUid, HostGid, HostId, HostUid, Id};
+use std::convert::TryFrom;
 use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::ops::{Add, Range, Sub};
@@ -39,7 +42,6 @@ pub struct IdMap<Guest: GuestId<HostType = Host>, Host: HostId<GuestType = Guest
 #[derive(Clone, Debug, PartialEq)]
 enum MapEntry<Source: Id, Target: Id> {
     /// Squash a range of IDs onto a single one.
-    #[allow(dead_code)] // to be removed when we allow parsing from the command line
     Squash {
         /// Range of source IDs.
         from: Range<Source>,
@@ -48,7 +50,6 @@ enum MapEntry<Source: Id, Target: Id> {
     },
 
     /// 1:1 map a range of IDs to another range (of the same length).
-    #[allow(dead_code)] // to be removed when we allow parsing from the command line
     Range {
         /// Range of source IDs.
         from: Range<Source>,
@@ -57,7 +58,6 @@ enum MapEntry<Source: Id, Target: Id> {
     },
 
     /// Disallow using this ID range: Return an error.
-    #[allow(dead_code)] // to be removed when we allow parsing from the command line
     Fail {
         /// Range of source IDs.
         from: Range<Source>,
@@ -102,6 +102,59 @@ where
             .map(|e| e.map(host_id))
             .unwrap_or(Ok(host_id.id_mapped()))
     }
+
+    /**
+     * Add a new mapping.
+     *
+     * Internal helper for [`Self::push_guest_to_host()`] and [`Self::push_host_to_guest()`].
+     *
+     * `map` points to either `self.guest_to_host` or `self.host_to_guest`.  `map_name` should be
+     * `"Guest-to-host"` or `"Host-to-guest"` accordingly, and is only used to generate potential
+     * error messages.
+     */
+    fn do_push<Source, Target>(
+        map: &mut RangeMap<Source::Inner, MapEntry<Source, Target>>,
+        map_name: &str,
+        entry: MapEntry<Source, Target>,
+    ) -> io::Result<()>
+    where
+        Source: Id + Sub<Source>,
+        Target: Id + Add<<Source as Sub>::Output, Output = Target>,
+    {
+        let wrapped_range = entry.source_range();
+        let inner_range = Range {
+            start: wrapped_range.start.into_inner(),
+            end: wrapped_range.end.into_inner(),
+        };
+        if map.intersects(inner_range.clone()) {
+            return Err(other_io_error(format!(
+                "{map_name} mapping '{entry}' intersects previously added entry"
+            )));
+        }
+
+        map.insert(inner_range, entry);
+        Ok(())
+    }
+
+    /**
+     * Add a new mapping of guest IDs to host ID(s).
+     *
+     * Internal helper for [`Self as
+     * TryFrom<Vec<cmdline::IdMap>>`](`Self#impl-TryFrom<Vec<IdMap>>-for-IdMap<Guest,+Host>`).
+     */
+    fn push_guest_to_host(&mut self, entry: MapEntry<Guest, Host>) -> io::Result<()> {
+        Self::do_push(&mut self.guest_to_host, "Guest-to-host", entry)
+    }
+
+    /**
+     * Add a new mapping of host IDs to guest ID(s).
+     *
+     * Internal helper for [`Self as
+     * TryFrom<Vec<cmdline::IdMap>>`](`Self#impl-TryFrom<Vec<IdMap>>-for-IdMap<Guest,+Host>`).
+     */
+    fn push_host_to_guest(&mut self, entry: MapEntry<Host, Guest>) -> io::Result<()> {
+        Self::do_push(&mut self.host_to_guest, "Host-to-guest", entry)
+    }
 }
 
 impl<Source: Id, Target: Id> MapEntry<Source, Target>
@@ -126,6 +179,15 @@ where
                 assert!(from.contains(&id));
                 Err(MapError::ExplicitFailMapping { id })
             }
+        }
+    }
+
+    /// Return the source ID range.
+    fn source_range(&self) -> &Range<Source> {
+        match self {
+            MapEntry::Squash { from, to: _ } => from,
+            MapEntry::Range { from, to_base: _ } => from,
+            MapEntry::Fail { from } => from,
         }
     }
 }
@@ -172,5 +234,106 @@ where
                 write!(f, "fail [{}, {})", from.start, from.end)
             }
         }
+    }
+}
+
+fn id_range_from_u32<I, P: Display>(base: u32, count: u32, param: P) -> io::Result<Range<I>>
+where
+    u32: Into<I>,
+{
+    let start: I = base.into();
+    let end: I = base
+        .checked_add(count)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Parameter {param}: Range overflow"),
+            )
+        })?
+        .into();
+    Ok(start..end)
+}
+
+impl<Guest, Host> TryFrom<Vec<cmdline::IdMap>> for IdMap<Guest, Host>
+where
+    Guest: GuestId<HostType = Host> + From<u32>,
+    Host: HostId<GuestType = Guest> + From<u32>,
+{
+    type Error = io::Error;
+
+    /// Convert from the command line representation to our runtime object.
+    fn try_from(cmdline: Vec<cmdline::IdMap>) -> io::Result<Self> {
+        let mut map = IdMap::empty();
+
+        for entry in cmdline {
+            match entry {
+                cmdline::IdMap::Guest {
+                    from_guest,
+                    to_host,
+                    count,
+                } => map
+                    .push_guest_to_host(MapEntry::Range {
+                        from: id_range_from_u32(from_guest, count, &entry)?,
+                        to_base: to_host.into(),
+                    })
+                    .err_context(|| entry)?,
+
+                cmdline::IdMap::Host {
+                    from_host,
+                    to_guest,
+                    count,
+                } => map
+                    .push_host_to_guest(MapEntry::Range {
+                        from: id_range_from_u32(from_host, count, &entry)?,
+                        to_base: to_guest.into(),
+                    })
+                    .err_context(|| entry)?,
+
+                cmdline::IdMap::SquashGuest {
+                    from_guest,
+                    to_host,
+                    count,
+                } => map
+                    .push_guest_to_host(MapEntry::Squash {
+                        from: id_range_from_u32(from_guest, count, &entry)?,
+                        to: to_host.into(),
+                    })
+                    .err_context(|| entry)?,
+
+                cmdline::IdMap::SquashHost {
+                    from_host,
+                    to_guest,
+                    count,
+                } => map
+                    .push_host_to_guest(MapEntry::Squash {
+                        from: id_range_from_u32(from_host, count, &entry)?,
+                        to: to_guest.into(),
+                    })
+                    .err_context(|| entry)?,
+
+                cmdline::IdMap::Bidirectional { guest, host, count } => {
+                    map.push_guest_to_host(MapEntry::Range {
+                        from: id_range_from_u32(guest, count, &entry)?,
+                        to_base: host.into(),
+                    })
+                    .err_context(|| &entry)?;
+
+                    map.push_host_to_guest(MapEntry::Range {
+                        from: id_range_from_u32(host, count, &entry)?,
+                        to_base: guest.into(),
+                    })
+                    .err_context(|| &entry)?;
+                }
+
+                cmdline::IdMap::ForbidGuest { from_guest, count } => {
+                    map.push_guest_to_host(MapEntry::Fail {
+                        from: (from_guest.into())..((from_guest + count).into()),
+                    })
+                    .err_context(|| &entry)?;
+                }
+            }
+        }
+
+        Ok(map)
     }
 }

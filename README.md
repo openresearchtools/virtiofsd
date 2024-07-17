@@ -326,6 +326,61 @@ Alternatively, you can simply map your own GID to a single GID in the namespace:
 For example, --gid-map=:0:1000:1: would map GID 1000 to root’s GID in the namespace (and thus the guest).
 
 ```shell
+--translate-uid=guest:<guest base UID>:<host base UID>:<count>
+--translate-uid=host:<host base UID>:<guest base UID>:<count>
+--translate-uid=squash-guest:<guest base UID>:<host UID>:<count>
+--translate-uid=squash-host:<host base UID>:<guest UID>:<count>
+--translate-uid=forbid-guest:<guest base UID>:<count>
+--translate-uid=map:<guest base UID>:<host base UID>:<count>
+```
+Set up a map for virtiofsd to internally translate between host and guest UIDs.  As opposed to `--uid-map`, this option
+does not require a user namespace, and may freely be used regardless of whether virtiofsd runs as root or not.
+
+Mapping from guest UIDs to host UIDs is independent from the reverse, i.e. setting up a *guest* or *squash-guest*
+mapping only instructs virtiofsd to follow this guest-to-host mapping, it does not imply any potentially corresponding
+host-to-guest mapping.  The only exception is the prefix-less form, which sets up a bidirectional mapping.
+
+- `guest:<guest base UID>:<host base UID>:<count>`: Maps the range [guest base UID, guest base UID + count) 1:1 to [host
+  base UID, host base UID + count), i.e. `guest UID ↦ host base UID + (guest UID - guest base UID)`.
+- `host:<host base UID>:<guest base UID>:<count>`: Reverse of the above, i.e. maps the range [host base UID, host base
+  UID + count) to [guest base UID, guest base UID + count); `host UID ↦ guest base UID + (host UID - host base UID)`.
+- `squash-guest:<guest base UID>:<host UID>:<count>`: Maps everything in the range [guest base UID, guest base UID +
+  count) to the single given host UID, i.e. `guest UID ↦ host UID`.
+- `squash-host:<host base UID>:<guest UID>:<count>`: Reverse of the above, i.e. maps the range [host base UID, host base
+  UID + count) to the single given guest UID, i.e. `host UID ↦ guest UID`.
+- `forbid-guest:<guest base UID>:<count>`: Prohibits use of guest UIDs in the given range: Returns an error to the guest
+  whenever it tries to use a UID in that range for a new file or assign such a UID to an existing file.
+- `map:<guest base UID>:<host base UID>:<count>`: Sets up a bidirectional 1:1 mapping between [guest base UID, guest
+  base UID + count) and [host base UID, host base UID + count), i.e. the same as passing both `guest:<guest base
+  UID>:<host base UID>:<count>` and `host:<host base UID>:<guest base UID>:<count>`.
+
+When giving multiple mappings, their source ranges must not overlap.
+
+Neither of `--translate-uid` and `--translate-gid` can be used together with `--posix-acl`; translating UIDs or GIDs in
+virtiofsd would break posix ACLs.
+
+Example use case: virtiofsd runs unprivileged with UID:GID 1001:100.  It cannot change its own UID/GID, so attempting to
+let the guest create files with any other UID/GID combination will fail.  By using `--translate-uid` and
+`--translate-gid`, however, a mapping from guest UIDs/GIDs can be set up such that virtiofsd will create files under the
+only combination that it can, which is 1001:100.  For example, to allow any guest user to create a file, we can squash
+everything to 1001:100, which will create all those files as 1001:100 on the host.  In the guest, we may want to have
+those files appear as 1000:1000, though, and all other UIDs and GIDs should be visible unchanged in the guest.  That
+would look like so:
+
+```shell
+virtiofsd [...] \
+    --translate-uid squash-guest:0:1001:4294967295 \
+    --translate-gid squash-guest:0:100:4294967295 \
+    --translate-uid host:1001:1000:1 \
+    --translate-gid host:100:1000:1
+```
+
+```shell
+--translate-gid=<type>:<source base GID>:<target base GID>:<count>
+```
+Same as `--translate-uid`, but for GIDs.
+
+```shell
 --migration-mode=<find-paths|file-handles>
 ```
 Defines how to perform migration, i.e. how to represent the internal state to the destination
