@@ -165,6 +165,42 @@ impl SerializableFileHandle {
             self.require_equal_without_mount_id(other)
         }
     }
+
+    /// Get the handle data (without its mount ID or type).
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.handle
+    }
+
+    /// Get the handle type.
+    pub fn handle_type(&self) -> i32 {
+        self.handle_type
+    }
+
+    /**
+     * Convert this handle into an openable handle.
+     *
+     * An openable handle must have a reference to a mount FD, i.e. a file descriptor on the mount
+     * identified by its mount ID.  That FD is `mount_fd`.
+     *
+     * (Note that `mount_fd.mount_id()` may differ from `self.mnt_id`.  When migrating, we will
+     * receive `SerializableFileHandle`s from the source with mount IDs valid only on the source,
+     * not here.  The caller is responsible for passing a fitting `mount_fd` for a mount ID valid
+     * here.)
+     */
+    pub fn to_openable(&self, mount_fd: Arc<MountFd>) -> io::Result<OpenableFileHandle> {
+        let c_handle: oslib::CFileHandle = self.try_into()?;
+        Ok(OpenableFileHandle {
+            handle: FileHandle {
+                // Use the mount FD’s mount ID instead of `self.mnt_id`: Serialized handles may
+                // contain mount IDs that aren’t valid on this host.  `MountFd` objects’ mount IDs
+                // are always valid on the current host, and because the caller guarantees that
+                // `mount_fd` can be used to open `self`, we can use its mount ID.
+                mnt_id: mount_fd.mount_id(),
+                handle: c_handle,
+            },
+            mount_fd,
+        })
+    }
 }
 
 impl From<&FileHandle> for SerializableFileHandle {

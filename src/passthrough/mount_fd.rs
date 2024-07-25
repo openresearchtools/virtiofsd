@@ -42,6 +42,11 @@ impl MountFd {
     pub fn file(&self) -> &File {
         &self.file
     }
+
+    /// Get the associated mount ID.
+    pub fn mount_id(&self) -> MountId {
+        self.mount_id
+    }
 }
 
 /**
