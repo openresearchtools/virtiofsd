@@ -87,6 +87,26 @@ pub struct InodeStore {
     inner: Arc<RwLock<InodeStoreInner>>,
 }
 
+/**
+ * Iterates over the inode store.
+ *
+ * Does not keep the store locked between `next()` calls, and will return inodes added while
+ * iterating.
+ */
+pub struct InodeIterator<'a> {
+    /// Inode store.
+    store: &'a InodeStore,
+
+    /**
+     * Last inode ID returned through `next()`.
+     *
+     * We visit inodes in numerical order of their ID, and because new IDs added to the store are
+     * always greater than all previous IDs, all remaining IDs to visit must be greater than this
+     * one.
+     */
+    last_inode: Option<Inode>,
+}
+
 impl<'a> InodeData {
     /// Get an `O_PATH` file for this inode
     pub fn get_file(&'a self) -> io::Result<InodeFile<'a>> {
@@ -339,10 +359,17 @@ impl InodeStore {
         self.inner.read().unwrap().inode_by_handle(handle)
     }
 
-    /// Invoke `func()` on each inode, collect all results, and return them.  Note that the inode
-    /// store is read-locked when `func()` is called.
-    pub fn map<V, F: Fn(&Arc<InodeData>) -> V>(&self, func: F) -> Vec<V> {
-        self.inner.read().unwrap().data.values().map(func).collect()
+    /**
+     * Iterate over every inode that we have in the store.
+     *
+     * Does not keep the store locked between `next()` calls, and will return inodes added while
+     * iterating.
+     */
+    pub fn iter(&self) -> InodeIterator<'_> {
+        InodeIterator {
+            store: self,
+            last_inode: None,
+        }
     }
 
     /// Turn the weak reference `inode` into a strong one (increments its refcount)
@@ -623,5 +650,23 @@ impl Drop for InodeStore {
     /// `InodeStoreInner` from being dropped.
     fn drop(&mut self) {
         self.inner.write().unwrap().clear();
+    }
+}
+
+impl Iterator for InodeIterator<'_> {
+    type Item = Arc<InodeData>;
+
+    fn next(&mut self) -> Option<Arc<InodeData>> {
+        let store = self.store.inner.read().unwrap();
+
+        // Find the inode with the lowest ID after `last_inode`.
+        // Note that iterators over `BTreeMap` return keys in numerical order, so
+        // `range(x..).next()` will always return the inode with the lowest ID greater than or
+        // equal to `x` (if any).
+        let lower_bound = self.last_inode.map(|last_id| last_id + 1).unwrap_or(0);
+        let (inode_id, inode_data) = store.data.range(lower_bound..).next()?;
+
+        self.last_inode = Some(*inode_id);
+        Some(Arc::clone(inode_data))
     }
 }

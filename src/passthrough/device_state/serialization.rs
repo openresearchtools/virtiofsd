@@ -43,7 +43,7 @@ impl TryFrom<&PassthroughFs> for serialized::PassthroughFsV1 {
 
         let inodes = if let Some(shared_dir) = fs.inodes.get(fuse::ROOT_ID) {
             let shared_dir_path = shared_dir.get_path(&fs.proc_self_fd);
-            fs.inodes.map(|inode| {
+            fs.inodes.iter().map(|inode| {
                 inode
                     .as_ref()
                     .as_serialized(fs, &shared_dir, &shared_dir_path)
@@ -59,7 +59,7 @@ impl TryFrom<&PassthroughFs> for serialized::PassthroughFsV1 {
                             file_handle: None,
                         }
                     })
-            })
+            }).collect()
         } else {
             // When unmounted, we will not have a root node, that's OK.  But there should not be
             // any other nodes either then.
