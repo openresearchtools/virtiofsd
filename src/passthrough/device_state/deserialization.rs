@@ -14,12 +14,13 @@ use crate::passthrough::device_state::preserialization::HandleMigrationInfo;
 use crate::passthrough::device_state::serialized;
 use crate::passthrough::file_handle::SerializableFileHandle;
 use crate::passthrough::inode_store::{InodeData, InodeIds, StrongInodeReference};
+use crate::passthrough::mount_fd::MountFd;
 use crate::passthrough::stat::statx;
 use crate::passthrough::util::{openat, printable_fd};
 use crate::passthrough::{
     FileOrHandle, HandleData, HandleDataFile, MigrationOnError, PassthroughFs,
 };
-use crate::util::{other_io_error, ErrorContext};
+use crate::util::{other_io_error, ErrorContext, ResultErrorContext};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::io;
@@ -58,12 +59,51 @@ impl serialized::PassthroughFsV1 {
     fn apply_with_mount_paths(
         mut self,
         fs: &PassthroughFs,
-        _mount_paths: HashMap<u64, String>,
+        mount_paths: HashMap<u64, String>,
     ) -> io::Result<()> {
         // Apply options as negotiated with the guest on the source
         self.negotiated_opts.apply(fs)?;
 
         fs.inodes.clear();
+
+        let _mount_fds: HashMap<u64, Arc<MountFd>> = if self.inodes.is_empty()
+            || mount_paths.is_empty()
+        {
+            // No nodes or mount paths given?  We will not need this map, just create an empty one
+            HashMap::new()
+        } else {
+            // Deserialize the root inode first; every path in `mount_paths` is relative to it, so
+            // we must have it open to deserialize the mount FD map
+            let Some((root_index, _)) = self
+                .inodes
+                .iter()
+                .enumerate()
+                .find(|(_, inode)| inode.id == fuse::ROOT_ID)
+            else {
+                return Err(other_io_error("Received no root node from the source"));
+            };
+            self.inodes
+                .swap_remove(root_index)
+                .deserialize_root_node(fs)?;
+
+            let root_node = fs.inodes.get(fuse::ROOT_ID).unwrap();
+            let root_node_file = root_node
+                .get_file()
+                .err_context(|| "Cannot open shared directory")?;
+
+            mount_paths.into_iter().filter_map(|(mount_id, mount_path)| {
+                match MountFd::new(fs.mount_fds.as_ref(), &root_node_file, &mount_path) {
+                    Ok(mount_fd) => Some((mount_id, mount_fd)),
+                    Err(err) => {
+                        warn!(
+                            "Failed to open path {mount_path} to open file handles for mount ID {mount_id}: {err}; \
+                            will not be able to open inodes represented by file handles on that mount"
+                        );
+                        None
+                    }
+                }
+            }).collect()
+        };
 
         // Some inodes may depend on other inodes being deserialized before them, so trying to
         // deserialize them without their dependency being fulfilled will return `false` below,

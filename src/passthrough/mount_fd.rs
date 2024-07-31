@@ -2,6 +2,8 @@
 // found in the LICENSE-BSD-3-Clause file.
 
 use crate::passthrough::stat::{statx, MountId};
+use crate::passthrough::util::openat;
+use crate::util::ResultErrorContext;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::File;
@@ -39,6 +41,55 @@ pub struct MountFds {
 }
 
 impl MountFd {
+    /**
+     * Create a new mount FD for the given `path` relative to `dir`.
+     *
+     * Its mount ID is taken from `statx()`.  If `mount_fds` is given, the mount FD is entered
+     * there; unless `mount_fds` already contains a mount FD for this mount ID, in which case that
+     * FD is returned instead of creating a new one.
+     *
+     * The use case for this is migration: The migration source sends us a mapping of its mount
+     * IDs to paths, so this function turns those paths into `MountFd` objects that can be used
+     * for `SerializableFileHandle::to_openable()`.  (Note that those mount IDs are only valid on
+     * the migration source, not here, on the destination; that’s why the `MountFd` object’s mount
+     * ID is taken from `statx()` instead of using the source’s ID.)
+     */
+    pub fn new<D: AsRawFd>(
+        mount_fds: Option<&MountFds>,
+        dir: &D,
+        path: &str,
+    ) -> io::Result<Arc<MountFd>> {
+        // Not documented in the man page, but mount FDs must be opened with `O_RDONLY` (not just
+        // `O_PATH`)
+        let file =
+            openat(dir, path, libc::O_RDONLY).err_context(|| format!("Failed to open {path}"))?;
+        let st = statx(&file, None).err_context(|| format!("Failed to get {path}'s mount ID"))?;
+
+        if let Some(mount_fds) = mount_fds {
+            let mut mfds_locked = mount_fds.map.write().unwrap();
+            // Same as in `MountFds::get()`: If there is an entry but upgrade fails, treat it as
+            // non-existent.  Overwriting it is safe because `MountFd::drop()` only removes
+            // `MountFds` entries that have a refcount of 0.
+            if let Some(mount_fd) = mfds_locked.get(&st.mnt_id).and_then(Weak::upgrade) {
+                return Ok(mount_fd);
+            }
+
+            let mount_fd = Arc::new(MountFd {
+                map: Arc::downgrade(&mount_fds.map),
+                mount_id: st.mnt_id,
+                file,
+            });
+            mfds_locked.insert(st.mnt_id, Arc::downgrade(&mount_fd));
+            Ok(mount_fd)
+        } else {
+            Ok(Arc::new(MountFd {
+                map: Weak::new(),
+                mount_id: st.mnt_id,
+                file,
+            }))
+        }
+    }
+
     pub fn file(&self) -> &File {
         &self.file
     }
