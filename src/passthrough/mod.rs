@@ -185,6 +185,9 @@ pub enum MigrationMode {
      */
     #[default]
     FindPaths,
+
+    /// Transfer inodes by their file handles.
+    FileHandles,
 }
 
 impl FromStr for MigrationMode {

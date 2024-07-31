@@ -58,6 +58,7 @@ impl InodeMigrationInfo {
             MigrationMode::FindPaths => {
                 find_paths::InodePath::new_with_cstr(parent_ref, filename)?.into()
             }
+            MigrationMode::FileHandles => unreachable!(), // Cannot be constructed yet, but TODO
         };
         Self::new_internal(fs_cfg, location, || file_or_handle.try_into())
     }
