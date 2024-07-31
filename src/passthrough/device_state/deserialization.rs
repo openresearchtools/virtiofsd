@@ -20,7 +20,7 @@ use crate::passthrough::{
     FileOrHandle, HandleData, HandleDataFile, MigrationOnError, PassthroughFs,
 };
 use crate::util::{other_io_error, ErrorContext};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,9 +36,30 @@ impl TryFrom<Vec<u8>> for serialized::PassthroughFs {
 }
 
 impl serialized::PassthroughFsV1 {
-    /// Apply the state represented in `self: PassthroughFsV1` to the given actual filesystem state
-    /// `fs: &PassthroughFs` (i.e. restore the inode store, open handles, etc.)
-    pub(super) fn apply(mut self, fs: &PassthroughFs) -> io::Result<()> {
+    /**
+     * Apply the state represented in `self: PassthroughFsV1` to `fs`.
+     *
+     * Restore the inode store, open handles, etc.
+     */
+    pub(super) fn apply(self, fs: &PassthroughFs) -> io::Result<()> {
+        self.apply_with_mount_paths(fs, HashMap::new())
+    }
+
+    /**
+     * Actual `apply()` implementation.
+     *
+     * Underlying implementation for both `PassthroughFsV1::apply()` and
+     * `PassthroughFsV2::apply()`.  Migrating file handles requires a map of source mount IDs to
+     * paths inside the shared directory, which is not present in `PassthroughFsV1`.  This function
+     * takes this argument (`mount_paths`) explicitly, allowing `PassthroughFsV1::apply()` to pass
+     * an empty map (not allowing migration of file handles), and `PassthroughFsV2::apply()` to
+     * pass the map it got.
+     */
+    fn apply_with_mount_paths(
+        mut self,
+        fs: &PassthroughFs,
+        _mount_paths: HashMap<u64, String>,
+    ) -> io::Result<()> {
         // Apply options as negotiated with the guest on the source
         self.negotiated_opts.apply(fs)?;
 
@@ -83,6 +104,17 @@ impl serialized::PassthroughFsV1 {
         fs.next_handle.store(self.next_handle, Ordering::Relaxed);
 
         Ok(())
+    }
+}
+
+impl serialized::PassthroughFsV2 {
+    /**
+     * Apply the state represented in `self: PassthroughFsV2` to `fs`.
+     *
+     * Restore the inode store, open handles, etc.
+     */
+    pub(super) fn apply(self, fs: &PassthroughFs) -> io::Result<()> {
+        self.v1.apply_with_mount_paths(fs, self.mount_paths)
     }
 }
 

@@ -84,6 +84,7 @@ impl SerializableFileSystem for PassthroughFs {
         state_pipe.read_to_end(&mut serialized)?;
         match serialized::PassthroughFs::try_from(serialized)? {
             serialized::PassthroughFs::V1(state) => state.apply(self)?,
+            serialized::PassthroughFs::V2(state) => state.apply(self)?,
         };
         Ok(())
     }
