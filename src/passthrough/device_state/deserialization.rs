@@ -18,7 +18,7 @@ use crate::passthrough::mount_fd::MountFd;
 use crate::passthrough::stat::statx;
 use crate::passthrough::util::{openat, printable_fd};
 use crate::passthrough::{
-    FileOrHandle, HandleData, HandleDataFile, MigrationOnError, PassthroughFs,
+    FileOrHandle, HandleData, HandleDataFile, InodeFileHandlesMode, MigrationOnError, PassthroughFs,
 };
 use crate::util::{other_io_error, ErrorContext, ResultErrorContext};
 use std::collections::{BTreeMap, HashMap};
@@ -66,7 +66,7 @@ impl serialized::PassthroughFsV1 {
 
         fs.inodes.clear();
 
-        let _mount_fds: HashMap<u64, Arc<MountFd>> = if self.inodes.is_empty()
+        let mount_fds: HashMap<u64, Arc<MountFd>> = if self.inodes.is_empty()
             || mount_paths.is_empty()
         {
             // No nodes or mount paths given?  We will not need this map, just create an empty one
@@ -115,7 +115,7 @@ impl serialized::PassthroughFsV1 {
             let mut i = 0;
             let mut processed_any = false;
             while i < self.inodes.len() {
-                if self.inodes[i].deserialize_with_fs(fs)? {
+                if self.inodes[i].deserialize_with_fs(fs, &mount_fds)? {
                     // All good
                     self.inodes.swap_remove(i);
                     processed_any = true;
@@ -207,7 +207,11 @@ impl serialized::Inode {
     /// Deserialize this inode into `fs`'s inode store.  Return `Ok(true)` on success, `Err(_)` on
     /// error, and `Ok(false)` when there is a dependency to another inode that has not yet been
     /// deserialized, so deserialization should be re-attempted later.
-    fn deserialize_with_fs(&self, fs: &PassthroughFs) -> io::Result<bool> {
+    fn deserialize_with_fs(
+        &self,
+        fs: &PassthroughFs,
+        mount_fds: &HashMap<u64, Arc<MountFd>>,
+    ) -> io::Result<bool> {
         match &self.location {
             serialized::InodeLocation::RootNode => {
                 if self.id != fuse::ROOT_ID {
@@ -279,6 +283,21 @@ impl serialized::Inode {
 
                 let inode_data = self
                     .deserialize_path(fs, shared_dir, filename)
+                    .or_else(|err| self.deserialize_invalid_inode(fs, err))?;
+
+                fs.inodes.new_inode(inode_data)?;
+                Ok(true)
+            }
+
+            serialized::InodeLocation::FileHandle { handle } => {
+                if self.id == fuse::ROOT_ID {
+                    return Err(other_io_error(
+                        "Refusing to use file handle given for root node".to_string(),
+                    ));
+                }
+
+                let inode_data = self
+                    .deserialize_file_handle(fs, mount_fds, handle)
                     .or_else(|err| self.deserialize_invalid_inode(fs, err))?;
 
                 fs.inodes.new_inode(inode_data)?;
@@ -411,6 +430,51 @@ impl serialized::Inode {
                 "Inode {} is not the same inode as in the migration source: {}",
                 self.id, err
             ))
+        })
+    }
+
+    /**
+     * Helper function for `deserialize_with_fs()`: Handle file handles.
+     *
+     * Get a mount FD for the given file handle, turning it into an
+     * [`OpenableFileHandle`](crate::passthrough::file_handle::OpenableFileHandle).  Then get the
+     * [`InodeIds`] we need to complete the [`InodeData`] object, and return that.
+     */
+    fn deserialize_file_handle(
+        &self,
+        fs: &PassthroughFs,
+        mount_fds: &HashMap<u64, Arc<MountFd>>,
+        handle: &SerializableFileHandle,
+    ) -> io::Result<InodeData> {
+        let source_mount_id = handle.mount_id();
+        let mfd = mount_fds
+            .get(&source_mount_id)
+            .ok_or_else(|| other_io_error(format!("Unknown mount ID {source_mount_id}")))?;
+        let ofh = handle.to_openable(Arc::clone(mfd))?;
+
+        let fd = ofh
+            .open(libc::O_PATH)
+            .err_context(|| "Opening file handle")?;
+        let st = statx(&fd, None).err_context(|| "stat")?;
+
+        let file_or_handle = match fs.cfg.inode_file_handles {
+            InodeFileHandlesMode::Never => FileOrHandle::File(fd),
+            InodeFileHandlesMode::Mandatory | InodeFileHandlesMode::Prefer => {
+                FileOrHandle::Handle(ofh)
+            }
+        };
+
+        Ok(InodeData {
+            inode: self.id,
+            file_or_handle,
+            refcount: AtomicU64::new(self.refcount),
+            ids: InodeIds {
+                ino: st.st.st_ino,
+                dev: st.st.st_dev,
+                mnt_id: st.mnt_id,
+            },
+            mode: st.st.st_mode,
+            migration_info: Mutex::new(None),
         })
     }
 }

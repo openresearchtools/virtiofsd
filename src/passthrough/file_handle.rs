@@ -176,13 +176,18 @@ impl SerializableFileHandle {
         self.handle_type
     }
 
+    /// Get the mount ID for which this handle is valid.
+    pub fn mount_id(&self) -> u64 {
+        self.mnt_id
+    }
+
     /**
      * Convert this handle into an openable handle.
      *
      * An openable handle must have a reference to a mount FD, i.e. a file descriptor on the mount
      * identified by its mount ID.  That FD is `mount_fd`.
      *
-     * (Note that `mount_fd.mount_id()` may differ from `self.mnt_id`.  When migrating, we will
+     * (Note that `mount_fd.mount_id()` may differ from `self.mount_id()`.  When migrating, we will
      * receive `SerializableFileHandle`s from the source with mount IDs valid only on the source,
      * not here.  The caller is responsible for passing a fitting `mount_fd` for a mount ID valid
      * here.)

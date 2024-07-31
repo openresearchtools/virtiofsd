@@ -118,6 +118,13 @@ pub(super) enum InodeLocation {
         /// `Path.filename`.
         filename: String,
     },
+
+    /// Described by its file handle
+    FileHandle {
+        /// File handle, which includes the source system’s mount ID (only valid as a key for the
+        /// [`PassthroughFsV2.mount_paths`](PassthroughFsV2#structfield.mount_paths) map).
+        handle: SerializableFileHandle,
+    },
 }
 
 /// Serializable representation of an open file (a handle)
