@@ -375,7 +375,7 @@ impl MountFds {
     }
 
     /// Given a mount ID, return the mount root path (by reading `/proc/self/mountinfo`)
-    fn get_mount_root(&self, mount_id: MountId) -> MPRResult<String> {
+    pub fn get_mount_root(&self, mount_id: MountId) -> MPRResult<String> {
         let mountinfo = {
             let mountinfo_file = &mut *self.mountinfo.lock().unwrap();
 
