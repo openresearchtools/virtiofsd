@@ -203,6 +203,9 @@ const CREATE_SUPP_GROUP: u64 = 1 << 34;
 /// Relax restrictions in FOPEN_DIRECT_IO mode to allow shared mmap.
 const DIRECT_IO_ALLOW_MMAP: u64 = 1 << 36;
 
+/// We need this for idmapped mounts support
+const ALLOW_IDMAP: u64 = 1 << 40;
+
 bitflags! {
     /// A bitfield passed in as a parameter to and returned from the `init` method of the
     /// `FileSystem` trait.
@@ -456,6 +459,9 @@ bitflags! {
 
         /// Allow shared mmap'ing of files in DIRECT_IO.
         const DIRECT_IO_ALLOW_MMAP = DIRECT_IO_ALLOW_MMAP;
+
+        /// Indicates if idmapped mounts are allowed for virtiofs.
+        const ALLOW_IDMAP = ALLOW_IDMAP;
     }
 }
 
