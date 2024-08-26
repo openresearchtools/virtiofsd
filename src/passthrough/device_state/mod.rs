@@ -22,7 +22,7 @@ mod serialized;
 use crate::filesystem::SerializableFileSystem;
 use crate::passthrough::PassthroughFs;
 use preserialization::find_paths;
-use preserialization::proc_paths::{ConfirmPaths, ImplicitPathCheck};
+use preserialization::proc_paths::{self, ConfirmPaths, ImplicitPathCheck};
 use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -41,9 +41,12 @@ impl SerializableFileSystem for PassthroughFs {
         self.track_migration_info.store(true, Ordering::Relaxed);
 
         // Create the reconstructor (which reconstructs parent+filename information for each node
-        // in our inode store), and run it
-        let reconstructor = find_paths::Constructor::new(self, Arc::clone(&cancel));
-        reconstructor.execute();
+        // in our inode store), and run it.  Try the proc_paths module first, if that advises us to
+        // fall back, try find_paths second.
+        if proc_paths::Constructor::new(self, Arc::clone(&cancel)).execute() {
+            warn!("Falling back to iterating through the shared directory to reconstruct paths for migration");
+            find_paths::Constructor::new(self, Arc::clone(&cancel)).execute();
+        }
 
         // Check reconstructed paths once.  This is to rule out TOCTTOU problems, specifically the
         // following:

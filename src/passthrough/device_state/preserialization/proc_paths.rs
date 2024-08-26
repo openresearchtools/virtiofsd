@@ -46,6 +46,16 @@ struct Walker<'a> {
 }
 
 /**
+ * Construct paths during preserialization.
+ *
+ * Give all inodes that don’t have a migration info set a path from /proc/self/fd.
+ */
+pub(in crate::passthrough::device_state) struct Constructor<'a> {
+    /// `Walker` in `Mode::Constructor` mode.
+    walker: Walker<'a>,
+}
+
+/**
  * `--migration-confirm-paths` implementation.
  *
  * Implements checking inodes’ paths right before serialization, as requested by the user through
@@ -77,6 +87,9 @@ pub(in crate::passthrough::device_state) struct ImplicitPathCheck<'a> {
 
 /// Selects how a `Walker` should behave.
 pub(in crate::passthrough::device_state) enum Mode {
+    /// Collect inodes’s paths during preserialization.
+    Constructor,
+
     /// Run the `--migration-confirm-paths` check.
     ConfirmPaths,
 
@@ -103,6 +116,50 @@ pub(in crate::passthrough) enum WrappedError {
 
     /// Unrecoverable error, falling back probably won’t change anything.
     Unrecoverable(io::Error),
+}
+
+impl<'a> Constructor<'a> {
+    /// Prepare to collect paths for `fs`.
+    pub fn new(fs: &'a PassthroughFs, cancel: Arc<AtomicBool>) -> Self {
+        Constructor {
+            walker: Walker::new(fs, Mode::Constructor, Some(cancel)),
+        }
+    }
+
+    /**
+     * Collect paths for all inodes in our inode store, during preserialization.
+     *
+     * Look through all inodes in our inode store, try to get their paths from /proc/self/fd,
+     * constructing `InodeMigrationInfo` data for them.  May take some time, so is done during the
+     * pre-serialization phase of migration.
+     *
+     * Cannot fail: Collecting inodes’ migration info is supposed to be a best-effort operation.
+     * We can leave any and even all inodes’ migration info empty, then serialize them as invalid
+     * inodes, and let the destination decide what to do based on its `--migration-on-error`
+     * setting.
+     *
+     * However, it is possible that we find inodes whose paths we failed to get from /proc/self/fd,
+     * but believe they probably do have a valid path inside the shared directory anyway (which the
+     * kernel just failed to report); in this case, return `true` so the caller can decide to fall
+     * back to the [`super::find_paths`] implementation.
+     */
+    pub fn execute(self) -> bool {
+        match self.walker.run() {
+            Ok(()) => false,
+
+            Err(WrappedError::Fallback(err)) => {
+                warn!("Failed to construct inode paths: {err}");
+                true
+            }
+
+            // Unrecoverable error where not even falling back makes sense should be a rare
+            // occurrence
+            Err(WrappedError::Unrecoverable(err)) => {
+                error!("Failed to construct inode paths: {err}; may be unable to migrate");
+                false
+            }
+        }
+    }
 }
 
 impl<'a> ConfirmPaths<'a> {
@@ -212,6 +269,19 @@ impl<'a> Walker<'a> {
             let set_path_result =
                 set_path_migration_info_from_proc_self_fd(&inode_data, self.fs, &shared_dir_path);
             match self.mode {
+                // For preserialization, finding inodes is not worth a notification.  For errors,
+                // we distinguish between errors for which we advise our caller to fall back to a
+                // different preserialization methods, and once where we do not.  The latter we
+                // just log, the former we return to the caller immediately.  They must then fall
+                // back to an exhaustive method, so aborting early is OK.
+                Mode::Constructor => match set_path_result {
+                    Ok(()) => (),
+                    Err(WrappedError::Fallback(err)) => return Err(WrappedError::Fallback(err)),
+                    Err(WrappedError::Unrecoverable(err)) => {
+                        error!("Inode {}: {}", inode_data.inode, err)
+                    }
+                },
+
                 // In check modes, we note inodes we found, and log all kinds of errors
                 // indiscriminately.
                 Mode::ConfirmPaths | Mode::ImplicitPathCheck => {
@@ -238,12 +308,15 @@ impl<'a> Walker<'a> {
     fn should_update_inode(&self, inode_data: &InodeData) -> bool {
         let mut migration_info_locked = inode_data.migration_info.lock().unwrap();
         match (&self.mode, migration_info_locked.as_ref()) {
-            // Do not touch inodes without migration info in the implicit/lax check mode
-            (Mode::ImplicitPathCheck, None) => false,
+            // Do not touch inodes:
+            // - Without migration info in the implicit/lax check mode
+            // - When we are supposed to collect migration info, not check/update it, i.e. during
+            //   preserialization, and the inode already has migration info
+            (Mode::ImplicitPathCheck, None) | (Mode::Constructor, Some(_)) => false,
 
-            // In the explicit check mode, give migration info to those inodes that don’t already
-            // have it
-            (Mode::ConfirmPaths, None) => true,
+            // In both the explicit check mode and the preserialization constructor, give migration
+            // info to those inodes that don’t already have it
+            (Mode::ConfirmPaths, None) | (Mode::Constructor, None) => true,
 
             // In both check modes, when there is pre-existing migration info, we have to check its
             // path; update those we find to be incorrect

@@ -175,8 +175,14 @@ impl FromStr for MigrationOnError {
 /// How to migrate our internal state to the destination instance
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MigrationMode {
-    /// Iterate through the shared directory to find paths for all inodes indexed and opened by the
-    /// guest, and transfer these paths to the destination.
+    /**
+     * Obtain paths for all inodes indexed and opened by the guest, and transfer those paths to
+     * the destination.
+     *
+     * To get those paths, we try to read the symbolic links in /proc/self/fd first; if that does
+     * not work, we will fall back to iterating through the shared directory (exhaustive search),
+     * enumerating all paths within.
+     */
     #[default]
     FindPaths,
 }

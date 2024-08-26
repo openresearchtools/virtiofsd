@@ -340,14 +340,16 @@ virtiofsd internally holds references to all inodes indexed or opened by the gue
 migration, these references need to be transferred to the destination; how that is done is
 determined with this switch:
 
-- **find-paths**: Iterate through the shared directory (exhaustive search) to find paths for all
-  inodes held by the source instance (relative to the shared directory), transfer these paths to the
-  destination, and let the destination instance open these paths.  This allows migration without
-  requiring special privileges, and regardless of whether source and destination use the same shared
-  directory; but it is expensive in terms of I/O (DFS through the shared directory) and is
-  vulnerable to third parties changing metadata in the shared directory while migration is ongoing
-  (e.g. renaming, unlinking, removing permissions), which can potentially lead to data loss and/or
-  corruption.
+- **find-paths**: For all inodes held by the source instance, look up their paths by reading the
+  symlinks in /proc/self/fd, transfer those paths to the destination, and let the destination
+  instance open those paths.
+  If any inode cannot be located this way, we fall back to iterating through the shared directory
+  (exhaustive search) to find those paths.
+  This allows migration without requiring special privileges, and regardless of whether source and
+  destination use the same shared directory; but is vulnerable to third parties changing metadata in
+  the shared directory while migration is ongoing (e.g. renaming, unlinking, removing permissions),
+  which can potentially lead to data loss and/or corruption.  In addition, the fall-back method of
+  iterating through the shared directory is expensive in terms of I/O.
 
 This parameter is ignored on the destination side of migration.
 
