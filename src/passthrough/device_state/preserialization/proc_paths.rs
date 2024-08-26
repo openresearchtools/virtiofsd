@@ -14,10 +14,11 @@
 
 use super::InodeMigrationInfo;
 use crate::fuse;
-use crate::passthrough::inode_store::{InodeData, StrongInodeReference};
-use crate::passthrough::util::relative_path;
+use crate::passthrough::inode_store::{InodeData, InodePathError, StrongInodeReference};
+use crate::passthrough::stat::statx;
+use crate::passthrough::util::{relative_path, FdPathError};
 use crate::passthrough::PassthroughFs;
-use crate::util::{other_io_error, ResultErrorContext};
+use crate::util::{other_io_error, ErrorContext};
 use std::ffi::{CStr, CString};
 use std::io;
 use std::path::Path;
@@ -83,6 +84,27 @@ pub(in crate::passthrough::device_state) enum Mode {
     ImplicitPathCheck,
 }
 
+/**
+ * Error type to enable `--migration-mode=find-paths` fall-back functionality.
+ *
+ * `--migration-mode=find-paths` first tries to get inodes’ paths from /proc/self/fd.  That
+ * implementation is provided by this module.  If that fails, this error allows distinguishing
+ * between:
+ * - errors that may not happen when using another method of finding inodes’ paths (e.g.
+ *   exhaustive iteration of everything inside of the shared directory), and
+ * - errors that would probably happen regardless.
+ *
+ * That is, if encountering errors of the former type, we should fall back to the other method
+ * (provided by [`super::find_paths`]).
+ */
+pub(in crate::passthrough) enum WrappedError {
+    /// A different preserialization method might be able to find this path.
+    Fallback(io::Error),
+
+    /// Unrecoverable error, falling back probably won’t change anything.
+    Unrecoverable(io::Error),
+}
+
 impl<'a> ConfirmPaths<'a> {
     /// Prepare to confirm paths collected for `fs`.
     pub fn new(fs: &'a PassthroughFs) -> Self {
@@ -98,7 +120,8 @@ impl<'a> ConfirmPaths<'a> {
      * into /proc/self/fd.  Return errors.
      */
     pub fn confirm_paths(self) -> io::Result<()> {
-        self.walker.run()
+        // There is no fallback in `ConfirmPaths` mode, treat all errors the same way
+        self.walker.run().map_err(WrappedError::into_inner)
     }
 }
 
@@ -119,6 +142,8 @@ impl<'a> ImplicitPathCheck<'a> {
      */
     pub fn check_paths(self) {
         if let Err(err) = self.walker.run() {
+            // There is no fallback in `ImplicitPathCheck` mode, treat all errors the same way
+            let err = err.into_inner();
             warn!("Double-check of all inode paths collected for migration failed: {err}")
         }
     }
@@ -139,21 +164,36 @@ impl<'a> Walker<'a> {
      *
      * Iterate through the store, check the paths we found (depending on the `mode`), and update
      * inodes’ migration info with paths from /proc/self/fd (depending on the `mode`).
+     *
+     * In case of error, differentiate between:
+     * - `Fallback(err)`: We failed to construct inode migration info for some number of inodes.
+     *                    However, we expect a different, more exhaustive method to find inodes’
+     *                    paths (e.g. DFS through the shared directory) can succeed.  In case of
+     *                    `Mode::Constructor`, the caller must fall back to such a different
+     *                    preserialization module (i.e. [`super::find_paths`]).  In other modes,
+     *                    this should be treated the same as `Unrecoverable`.
+     * - `Unrecoverable(err)`: Hard error, falling back to a different method is not advised.
      */
-    fn run(self) -> io::Result<()> {
+    fn run(self) -> Result<(), WrappedError> {
         let Some(root_node) = self.fs.inodes.get(fuse::ROOT_ID) else {
             // No root?  That’s fine if and only if we don’t have any inodes at all.
             return if self.fs.inodes.is_empty() {
                 Ok(())
             } else {
-                Err(other_io_error("Root node not found"))
+                // Should never happen, consider this error unrecoverable
+                Err(WrappedError::Unrecoverable(other_io_error(
+                    "Root node not found",
+                )))
             };
         };
 
-        let shared_dir_path = root_node
-            .get_path(&self.fs.proc_self_fd)
-            .map_err(io::Error::from)
-            .err_context(|| "Failed to get shared directory's path")?;
+        // It’s possible we fail to get the root node’s path, but we can’t continue then.  Advise
+        // to fall back on error.
+        let shared_dir_path = root_node.get_path(&self.fs.proc_self_fd).map_err(|err| {
+            WrappedError::Fallback(
+                io::Error::from(err).context("Failed to get shared directory's path"),
+            )
+        })?;
 
         for inode_data in self.fs.inodes.iter() {
             if self
@@ -172,10 +212,11 @@ impl<'a> Walker<'a> {
             let set_path_result =
                 set_path_migration_info_from_proc_self_fd(&inode_data, self.fs, &shared_dir_path);
             match self.mode {
-                // In check modes, we note inodes we found, and log all errors
+                // In check modes, we note inodes we found, and log all kinds of errors
+                // indiscriminately.
                 Mode::ConfirmPaths | Mode::ImplicitPathCheck => {
                     if let Err(err) = set_path_result {
-                        error!("Inode {}: {}", inode_data.inode, err);
+                        error!("Inode {}: {}", inode_data.inode, err.into_inner());
                     } else if let Some(new_info) =
                         inode_data.migration_info.lock().unwrap().as_ref()
                     {
@@ -225,6 +266,15 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// Return an inode’s link count, if available.
+fn link_count(inode_data: &InodeData) -> Option<u64> {
+    inode_data
+        .get_file()
+        .ok()
+        .and_then(|f| statx(&f, None).ok())
+        .map(|stat| stat.st.st_nlink)
+}
+
 /**
  * Update inode migration info from /proc/self/fd.
  *
@@ -239,26 +289,77 @@ pub(in crate::passthrough) fn set_path_migration_info_from_proc_self_fd(
     inode_data: &InodeData,
     fs: &PassthroughFs,
     shared_dir_path: &CStr,
-) -> io::Result<()> {
-    let abs_path = inode_data
-        .get_path(&fs.proc_self_fd)
-        .map_err(io::Error::from)
-        .err_context(|| "Failed to get path from /proc/self/fd")?;
+) -> Result<(), WrappedError> {
+    let abs_path_result = inode_data.get_path(&fs.proc_self_fd);
+    let Ok(abs_path) = abs_path_result else {
+        let err = abs_path_result.unwrap_err();
+        // In case of `Mode::Constructor`, depending on the exact kind of error, figure out whether
+        // it makes sense to fall back to a different method of finding inodes’ paths
+        let fall_back = match &err {
+            // If the kernel reports this inode to be deleted even though it has a link somewhere,
+            // fall back and try to find that link’s path
+            InodePathError::FdPathError(FdPathError::Deleted(_)) => {
+                link_count(inode_data).map(|n| n > 0).unwrap_or(false)
+            }
 
-    let rel_path = relative_path(&abs_path, shared_dir_path)?
+            // If the kernel reports this inode under a path outside of the shared directory but it
+            // has multiple links, one of those might be inside of the shared directory, so fall
+            // back and try to find it
+            InodePathError::OutsideRoot => link_count(inode_data).map(|n| n > 1).unwrap_or(false),
+
+            // Very general problem, should not happen, so consider this unrecoverable
+            InodePathError::NoFd(_) => false,
+
+            // Consider all other internal errors from getting the path from /proc/self/fd to be
+            // problems pertaining specifically to this method of obtaining paths, i.e. mark them
+            // as `Fallback` errors
+            InodePathError::FdPathError(_) => true,
+        };
+        let err = io::Error::from(err).context("Failed to get path from /proc/self/fd");
+        return if fall_back {
+            Err(WrappedError::Fallback(err))
+        } else {
+            Err(WrappedError::Unrecoverable(err))
+        };
+    };
+
+    let rel_path = relative_path(&abs_path, shared_dir_path)
+        .map_err(|err| {
+            // Same as `OutsideRoot` above
+            if link_count(inode_data).map(|n| n > 1).unwrap_or(false) {
+                WrappedError::Fallback(err)
+            } else {
+                WrappedError::Unrecoverable(err)
+            }
+        })?
         .to_str()
-        .map_err(|err| other_io_error(format!("Path {abs_path:?} is not a UTF-8 string: {err}")))?
+        .map_err(|err| {
+            // Non UTF-8 path names are unrecoverable
+            WrappedError::Unrecoverable(other_io_error(format!(
+                "Path {abs_path:?} is not a UTF-8 string: {err}"
+            )))
+        })?
         .to_string();
 
     let path = Path::new(&rel_path);
 
-    let mut parent = fs.inodes.get_strong(fuse::ROOT_ID)?;
+    // Getting the root node should always succeed; if it doesn’t, everything is broken anyway and
+    // falling back will not fix it.
+    let mut parent = fs
+        .inodes
+        .get_strong(fuse::ROOT_ID)
+        .map_err(WrappedError::Unrecoverable)?;
 
     for element in path {
         // Both `unwrap()`s must succeed: We know the path is UTF-8, and we know it does not
         // contain internal NULs (because it used to be a CString before)
         let element_cstr = CString::new(element.to_str().unwrap()).unwrap();
-        let entry = fs.do_lookup(parent.get().inode, &element_cstr)?;
+        // This look-up automatically sets the inode migration data on this inode.
+        // If we fail the look-up (i.e. fail to traverse the path), other migration methods are
+        // unlikely to succeed either, so consider errors here unrecoverable.
+        let entry = fs
+            .do_lookup(parent.get().inode, &element_cstr)
+            .map_err(WrappedError::Unrecoverable)?;
 
         // `entry.inode` is effectively a strong reference, so this must succeed
         let entry_data = fs.inodes.get(entry.inode).unwrap();
@@ -269,12 +370,18 @@ pub(in crate::passthrough) fn set_path_migration_info_from_proc_self_fd(
             let entry_data = entry_inode.get();
             let mut mig_info = entry_data.migration_info.lock().unwrap();
             if mig_info.is_none() {
-                *mig_info = Some(InodeMigrationInfo::new(
-                    &fs.cfg,
-                    parent,
-                    &element_cstr,
-                    &entry_data.file_or_handle,
-                )?);
+                // If we fail to set the migration info while traversing the path, other
+                // preserialization methods will likely encounter the same problem.  Unrecoverable
+                // error.
+                *mig_info = Some(
+                    InodeMigrationInfo::new(
+                        &fs.cfg,
+                        parent,
+                        &element_cstr,
+                        &entry_data.file_or_handle,
+                    )
+                    .map_err(WrappedError::Unrecoverable)?,
+                );
             }
         }
 
@@ -282,10 +389,22 @@ pub(in crate::passthrough) fn set_path_migration_info_from_proc_self_fd(
     }
 
     if parent.get().inode != inode_data.inode {
-        return Err(other_io_error(format!(
+        // For some reason, we failed to end up on the inode where we wanted to end up.  Maybe
+        // another preserialization method would have more luck?  Advise to fall back.
+        return Err(WrappedError::Fallback(other_io_error(format!(
             "Inode not found under path reported by /proc/self/fd ({rel_path:?})"
-        )));
+        ))));
     }
 
     Ok(())
+}
+
+impl WrappedError {
+    /// Return the contained `io::Error`, discarding the fall-back advice.
+    pub fn into_inner(self) -> io::Error {
+        match self {
+            WrappedError::Fallback(err) => err,
+            WrappedError::Unrecoverable(err) => err,
+        }
+    }
 }

@@ -1382,6 +1382,7 @@ impl PassthroughFs {
             self,
             &shared_dir_path,
         )
+        .map_err(preserialization::proc_paths::WrappedError::into_inner)
     }
 }
 
