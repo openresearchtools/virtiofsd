@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::{InodeLocation, InodeMigrationInfo, InodeMigrationInfoConstructor};
+use super::{InodeLocation, InodeMigrationInfo};
 use crate::filesystem::DirectoryIterator;
 use crate::fuse;
 use crate::passthrough::file_handle::FileHandle;
@@ -68,6 +68,25 @@ impl From<InodePath> for InodeLocation {
 impl<'a> Constructor<'a> {
     pub fn new(fs: &'a PassthroughFs, cancel: Arc<AtomicBool>) -> Self {
         Constructor { fs, cancel }
+    }
+
+    /**
+     * Collect paths for all inodes in our inode store, during preserialization.
+     *
+     * Recurse from the root directory (the shared directory), constructing `InodeMigrationInfo`
+     * data for every inode in the inode store.  This may take a long time, which is why it is done
+     * in the preserialization phase.
+     *
+     * Cannot fail: Collecting inodes’ migration info is supposed to be a best-effort operation.
+     * We can leave any and even all inodes’ migration info empty, then serialize them as invalid
+     * inodes, and let the destination decide what to do based on its --migration-on-error setting.
+     */
+    pub fn execute(self) {
+        // Only need to do something if we have a root node to recurse from; otherwise the
+        // filesystem is not mounted and we do not need to do anything.
+        if let Ok(root) = self.fs.inodes.get_strong(fuse::ROOT_ID) {
+            self.recurse_from(root);
+        }
     }
 
     /// Recurse from the given directory inode
@@ -226,16 +245,5 @@ impl<'a> Constructor<'a> {
         };
 
         Ok(Some(self.fs.inodes.get_or_insert(new_inode)?))
-    }
-}
-
-impl InodeMigrationInfoConstructor for Constructor<'_> {
-    /// Recurse from the root directory (the shared directory)
-    fn execute(self) {
-        // Only need to do something if we have a root node to recurse from; otherwise the
-        // filesystem is not mounted and we do not need to do anything.
-        if let Ok(root) = self.fs.inodes.get_strong(fuse::ROOT_ID) {
-            self.recurse_from(root);
-        }
     }
 }

@@ -21,7 +21,7 @@ mod serialized;
 
 use crate::filesystem::SerializableFileSystem;
 use crate::passthrough::PassthroughFs;
-use preserialization::{find_paths, InodeMigrationInfoConstructor};
+use preserialization::find_paths;
 use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io::{self, Read, Write};
