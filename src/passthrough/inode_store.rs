@@ -5,16 +5,18 @@ use crate::fuse;
 use crate::passthrough::device_state::preserialization::InodeMigrationInfo;
 use crate::passthrough::file_handle::{FileHandle, FileOrHandle};
 use crate::passthrough::stat::MountId;
-use crate::passthrough::util::{ebadf, get_path_by_fd, is_safe_inode, reopen_fd_through_proc};
+use crate::passthrough::util::{
+    ebadf, get_path_by_fd, is_safe_inode, reopen_fd_through_proc, FdPathError,
+};
 use crate::util::other_io_error;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::File;
-use std::io;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::{fmt, io};
 
 pub type Inode = u64;
 
@@ -107,6 +109,25 @@ pub(crate) struct InodeIterator<'a> {
     last_inode: Option<Inode>,
 }
 
+/**
+ * Errors that `InodeData::get_path()` can encounter.
+ *
+ * This specialized error type exists so that
+ * [`crate::passthrough::device_state::preserialization::proc_paths`] can decide which errors it
+ * considers recoverable.
+ */
+#[derive(Debug)]
+pub(crate) enum InodePathError {
+    /// Failed to get an FD for this inode.
+    NoFd(io::Error),
+
+    /// `util::get_path_by_fd()` failed.
+    FdPathError(FdPathError),
+
+    /// Path reported by `util::get_path_by_fd()` is outside of the shared directory.
+    OutsideRoot,
+}
+
 impl<'a> InodeData {
     /// Get an `O_PATH` file for this inode
     pub fn get_file(&'a self) -> io::Result<InodeFile<'a>> {
@@ -124,16 +145,14 @@ impl<'a> InodeData {
     }
 
     /// Try to obtain this inode's path through /proc/self/fd
-    pub fn get_path(&self, proc_self_fd: &File) -> io::Result<CString> {
-        let path = get_path_by_fd(&self.get_file()?, proc_self_fd)?;
+    pub fn get_path(&self, proc_self_fd: &File) -> Result<CString, InodePathError> {
+        let fd = self.get_file().map_err(InodePathError::NoFd)?;
+        let path = get_path_by_fd(&fd, proc_self_fd).map_err(InodePathError::FdPathError)?;
 
         // Kernel will report nodes beyond our root as having path / -- but only the root node (the
         // shared directory) can actually have that path, so for others, it must be inaccurate
         if path.as_bytes() == b"/" && self.inode != fuse::ROOT_ID {
-            return Err(other_io_error(
-                "Got empty path for non-root node, so it is outside the shared directory"
-                    .to_string(),
-            ));
+            return Err(InodePathError::OutsideRoot);
         }
 
         Ok(path)
@@ -650,3 +669,30 @@ impl Iterator for InodeIterator<'_> {
         Some(Arc::clone(inode_data))
     }
 }
+
+impl From<InodePathError> for io::Error {
+    fn from(err: InodePathError) -> Self {
+        match err {
+            InodePathError::NoFd(err) => err,
+            InodePathError::FdPathError(err) => err.into(),
+            InodePathError::OutsideRoot => other_io_error(
+                "Got empty path for non-root node, so it is outside the shared directory",
+            ),
+        }
+    }
+}
+
+impl fmt::Display for InodePathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InodePathError::NoFd(err) => write!(f, "{err}"),
+            InodePathError::FdPathError(err) => write!(f, "{err}"),
+            InodePathError::OutsideRoot => write!(
+                f,
+                "Got empty path for non-root node, so it is outside the shared directory",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InodePathError {}

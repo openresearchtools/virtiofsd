@@ -1374,6 +1374,7 @@ impl PassthroughFs {
             .get(fuse::ROOT_ID)
             .ok_or_else(|| other_io_error("Shared directory root node not found"))?
             .get_path(&self.proc_self_fd)
+            .map_err(io::Error::from)
             .err_context(|| "Failed to get shared directory root path")?;
 
         preserialization::proc_paths::set_path_migration_info_from_proc_self_fd(

@@ -152,6 +152,7 @@ impl<'a> Walker<'a> {
 
         let shared_dir_path = root_node
             .get_path(&self.fs.proc_self_fd)
+            .map_err(io::Error::from)
             .err_context(|| "Failed to get shared directory's path")?;
 
         for inode_data in self.fs.inodes.iter() {
@@ -241,6 +242,7 @@ pub(in crate::passthrough) fn set_path_migration_info_from_proc_self_fd(
 ) -> io::Result<()> {
     let abs_path = inode_data
         .get_path(&fs.proc_self_fd)
+        .map_err(io::Error::from)
         .err_context(|| "Failed to get path from /proc/self/fd")?;
 
     let rel_path = relative_path(&abs_path, shared_dir_path)?
