@@ -17,7 +17,6 @@ use crate::passthrough::inode_store::InodeData;
 use crate::passthrough::{Handle, HandleData, PassthroughFs};
 use crate::util::other_io_error;
 use std::convert::TryFrom;
-use std::ffi::CString;
 use std::io;
 use std::sync::atomic::Ordering;
 
@@ -38,35 +37,23 @@ impl TryFrom<&PassthroughFs> for serialized::PassthroughFsV1 {
     fn try_from(fs: &PassthroughFs) -> io::Result<Self> {
         let handles_map = fs.handles.read().unwrap();
 
-        let inodes = if let Some(shared_dir) = fs.inodes.get(fuse::ROOT_ID) {
-            let shared_dir_path = shared_dir.get_path(&fs.proc_self_fd);
-            fs.inodes.iter().map(|inode| {
-                inode
-                    .as_ref()
-                    .as_serialized(fs, &shared_dir, &shared_dir_path)
-                    .unwrap_or_else(|err| {
-                        warn!(
-                            "Failed to serialize inode {} (st_dev={}, mnt_id={}, st_ino={}): {}; marking as invalid",
-                            inode.inode, inode.ids.dev, inode.ids.mnt_id, inode.ids.ino, err
-                        );
-                        serialized::Inode {
-                            id: inode.inode,
-                            refcount: inode.refcount.load(Ordering::Relaxed),
-                            location: serialized::InodeLocation::Invalid,
-                            file_handle: None,
-                        }
-                    })
-            }).collect()
-        } else {
-            // When unmounted, we will not have a root node, that's OK.  But there should not be
-            // any other nodes either then.
-            if !fs.inodes.is_empty() {
-                return Err(other_io_error(
-                    "Root node (shared directory) not in inode store".to_string(),
-                ));
-            };
-            Vec::new()
-        };
+        let inodes = fs.inodes.iter().map(|inode| {
+            inode
+                .as_ref()
+                .as_serialized(fs)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        "Failed to serialize inode {} (st_dev={}, mnt_id={}, st_ino={}): {}; marking as invalid",
+                        inode.inode, inode.ids.dev, inode.ids.mnt_id, inode.ids.ino, err
+                    );
+                    serialized::Inode {
+                        id: inode.inode,
+                        refcount: inode.refcount.load(Ordering::Relaxed),
+                        location: serialized::InodeLocation::Invalid,
+                        file_handle: None,
+                    }
+                })
+        }).collect();
 
         let handles = handles_map
             .iter()
@@ -99,12 +86,7 @@ impl From<&PassthroughFs> for serialized::NegotiatedOpts {
 
 impl InodeData {
     /// Serialize an inode, which requires that its `migration_info` is set
-    fn as_serialized(
-        &self,
-        fs: &PassthroughFs,
-        shared_dir: &InodeData,
-        shared_dir_path: &io::Result<CString>,
-    ) -> io::Result<serialized::Inode> {
+    fn as_serialized(&self, fs: &PassthroughFs) -> io::Result<serialized::Inode> {
         let id = self.inode;
         let refcount = self.refcount.load(Ordering::Relaxed);
 
@@ -129,7 +111,7 @@ impl InodeData {
         );
 
         // Serialize the information that tells the destination how to find this inode
-        let location = migration_info.as_serialized(self, fs, shared_dir, shared_dir_path)?;
+        let location = migration_info.as_serialized()?;
 
         let file_handle = if fs.cfg.migration_verify_handles {
             // We could construct the file handle now, but we don't want to do I/O here.  It should
@@ -156,13 +138,7 @@ impl InodeData {
 impl InodeMigrationInfo {
     /// Helper for serializing inodes: Turn their prepared `migration_info` into a
     /// `serialized::InodeLocation`
-    fn as_serialized(
-        &self,
-        _inode_data: &InodeData,
-        _fs: &PassthroughFs,
-        _shared_dir: &InodeData,
-        _shared_dir_path: &io::Result<CString>,
-    ) -> io::Result<serialized::InodeLocation> {
+    fn as_serialized(&self) -> io::Result<serialized::InodeLocation> {
         Ok(match &self.location {
             preserialization::InodeLocation::RootNode => serialized::InodeLocation::RootNode,
 
