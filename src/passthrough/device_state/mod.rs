@@ -22,6 +22,7 @@ mod serialized;
 use crate::filesystem::SerializableFileSystem;
 use crate::passthrough::PassthroughFs;
 use preserialization::find_paths;
+use preserialization::proc_paths::ConfirmPaths;
 use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -47,6 +48,14 @@ impl SerializableFileSystem for PassthroughFs {
 
     fn serialize(&self, mut state_pipe: File) -> io::Result<()> {
         self.track_migration_info.store(false, Ordering::Relaxed);
+
+        if self.cfg.migration_confirm_paths {
+            let checker = ConfirmPaths::new(self);
+            if let Err(err) = checker.confirm_paths() {
+                self.inodes.clear_migration_info();
+                return Err(err);
+            }
+        }
 
         let state = serialized::PassthroughFs::V1(self.try_into()?);
         self.inodes.clear_migration_info();

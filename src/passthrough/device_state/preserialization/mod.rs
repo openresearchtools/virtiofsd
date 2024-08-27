@@ -3,13 +3,15 @@
 // found in the LICENSE file.
 
 use crate::passthrough::file_handle::{FileOrHandle, SerializableFileHandle};
-use crate::passthrough::inode_store::StrongInodeReference;
+use crate::passthrough::inode_store::{InodeData, StrongInodeReference};
 use crate::passthrough::{self, MigrationMode};
 use std::convert::TryInto;
 use std::ffi::CStr;
+use std::fmt::{self, Display};
 use std::io;
 
 pub mod find_paths;
+pub mod proc_paths;
 
 /// Precursor to `serialized::Inode` that is constructed while serialization is being prepared, and
 /// will then be transformed into the latter at the time of serialization.  To be stored in the
@@ -109,6 +111,29 @@ impl InodeMigrationInfo {
         match &self.location {
             InodeLocation::RootNode => false,
             InodeLocation::Path(_) => true,
+        }
+    }
+
+    /**
+     * Assuming this migration info contains a path, check whether the associated inode (given
+     * through `inode_data`) is indeed present under that path, returning an error if (and only if)
+     * it is not.
+     *
+     * Always return `Ok(())` if this migration info’s location is not defined by a path.
+     */
+    pub fn check_path_presence(&self, inode_data: &InodeData) -> io::Result<()> {
+        match &self.location {
+            InodeLocation::RootNode => Ok(()),
+            InodeLocation::Path(p) => p.check_presence(inode_data, self),
+        }
+    }
+}
+
+impl Display for InodeLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InodeLocation::RootNode => write!(f, "[shared directory root]"),
+            InodeLocation::Path(p) => write!(f, "{p}"),
         }
     }
 }

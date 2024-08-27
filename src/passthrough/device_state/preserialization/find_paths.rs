@@ -13,6 +13,7 @@ use crate::read_dir::ReadDir;
 use crate::util::{other_io_error, ResultErrorContext};
 use std::convert::{TryFrom, TryInto};
 use std::ffi::{CStr, CString};
+use std::fmt::{self, Display};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -56,7 +57,7 @@ impl InodePath {
 
     /// Checker whether the associated inode (`inode_data`) is present under this path, returning
     /// an error if (and only if) it is not.
-    pub(in crate::passthrough::device_state) fn check_presence(
+    pub(super) fn check_presence(
         &self,
         inode_data: &InodeData,
         full_info: &InodeMigrationInfo,
@@ -108,6 +109,18 @@ impl InodePath {
 impl From<InodePath> for InodeLocation {
     fn from(path: InodePath) -> Self {
         InodeLocation::Path(path)
+    }
+}
+
+impl Display for InodePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parent = self.parent.get();
+        let parent_mig_info_locked = parent.migration_info.lock().unwrap();
+        if let Some(parent_mig_info) = parent_mig_info_locked.as_ref() {
+            write!(f, "{}/{}", parent_mig_info.location, self.filename)
+        } else {
+            write!(f, "[inode {}]/{}", parent.inode, self.filename)
+        }
     }
 }
 
