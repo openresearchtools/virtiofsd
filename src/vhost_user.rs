@@ -113,15 +113,14 @@ impl convert::From<Error> for io::Error {
     }
 }
 
-// TODO: Type and members should be private.
-pub struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
-    pub mem: Option<LoggedMemoryAtomic>,
-    pub kill_evt: EventFd,
-    pub server: Arc<Server<F>>,
+struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
+    mem: Option<LoggedMemoryAtomic>,
+    kill_evt: EventFd,
+    server: Arc<Server<F>>,
     // handle request from backend to frontend
-    pub vu_req: Option<Backend>,
-    pub event_idx: bool,
-    pub pool: Option<ThreadPool>,
+    vu_req: Option<Backend>,
+    event_idx: bool,
+    pool: Option<ThreadPool>,
 }
 
 impl<F: FileSystem + Send + Sync + 'static> Clone for VhostUserFsThread<F> {
@@ -138,8 +137,7 @@ impl<F: FileSystem + Send + Sync + 'static> Clone for VhostUserFsThread<F> {
 }
 
 impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsThread<F> {
-    // TODO: Should be private.
-    pub fn new(fs: F, thread_pool_size: usize) -> Result<Self> {
+    fn new(fs: F, thread_pool_size: usize) -> Result<Self> {
         let pool = if thread_pool_size > 0 {
             // Test that unshare(CLONE_FS) works, it will be called for each thread.
             // It's an unprivileged system call but some Docker/Moby versions are
@@ -297,8 +295,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
         Ok(used_any)
     }
 
-    // TODO: Should be private.
-    pub fn handle_event_pool(
+    fn handle_event_pool(
         &self,
         device_event: u16,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
@@ -338,8 +335,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
         Ok(())
     }
 
-    // TODO: Should be private.
-    pub fn handle_event_serial(
+    fn handle_event_serial(
         &self,
         device_event: u16,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
