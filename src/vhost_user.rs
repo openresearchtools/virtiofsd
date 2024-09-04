@@ -3,18 +3,29 @@
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
 use std::convert::TryInto;
-use std::sync::Arc;
+use std::fs::File;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::{self, JoinHandle};
 use std::{convert, error, fmt, io};
 
 use futures::executor::{ThreadPool, ThreadPoolBuilder};
 use libc::EFD_NONBLOCK;
 use log::*;
 
+use vhost::vhost_user::message::*;
 use vhost::vhost_user::Backend;
 use vhost_user_backend::bitmap::BitmapMmapRegion;
-use vhost_user_backend::{VringMutex, VringState, VringT};
+use vhost_user_backend::{VhostUserBackend, VringMutex, VringState, VringT};
+use virtio_bindings::bindings::virtio_config::*;
+use virtio_bindings::bindings::virtio_ring::{
+    VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
+};
 use virtio_queue::{DescriptorChain, QueueOwnedT};
-use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap};
+use vm_memory::{
+    ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap, Le32,
+};
+use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::descriptor_utils::{Error as VufDescriptorError, Reader, Writer};
@@ -25,6 +36,14 @@ use crate::Error as VhostUserFsError;
 
 type LoggedMemory = GuestMemoryMmap<BitmapMmapRegion>;
 type LoggedMemoryAtomic = GuestMemoryAtomic<LoggedMemory>;
+
+const QUEUE_SIZE: usize = 32768;
+// The spec allows for multiple request queues. We currently only support one.
+const REQUEST_QUEUES: u32 = 1;
+// In addition to the request queue there is one high-prio queue.
+// Since VIRTIO_FS_F_NOTIFICATION is not advertised we do not have a
+// notification queue.
+const NUM_QUEUES: usize = REQUEST_QUEUES as usize + 1;
 
 // The guest queued an available buffer for the high priority queue.
 const HIPRIO_QUEUE_EVENT: u16 = 0;
@@ -358,5 +377,316 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
         }
 
         Ok(())
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioFsConfig {
+    tag: [u8; MAX_TAG_LEN],
+    num_request_queues: Le32,
+}
+
+// vm-memory needs a Default implementation even though these values are never
+// used anywhere...
+impl Default for VirtioFsConfig {
+    fn default() -> Self {
+        Self {
+            tag: [0; MAX_TAG_LEN],
+            num_request_queues: Le32::default(),
+        }
+    }
+}
+
+unsafe impl ByteValued for VirtioFsConfig {}
+
+struct PremigrationThread {
+    handle: JoinHandle<()>,
+    cancel: Arc<AtomicBool>,
+}
+
+pub struct VhostUserFsBackend<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> {
+    thread: RwLock<VhostUserFsThread<F>>,
+    premigration_thread: Mutex<Option<PremigrationThread>>,
+    migration_thread: Mutex<Option<JoinHandle<io::Result<()>>>>,
+    tag: Option<String>,
+}
+
+impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsBackend<F> {
+    pub fn new(fs: F, thread_pool_size: usize, tag: Option<String>) -> Result<Self> {
+        let thread = RwLock::new(VhostUserFsThread::new(fs, thread_pool_size)?);
+        Ok(VhostUserFsBackend {
+            thread,
+            premigration_thread: None.into(),
+            migration_thread: None.into(),
+            tag,
+        })
+    }
+}
+
+impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBackend
+    for VhostUserFsBackend<F>
+{
+    type Bitmap = BitmapMmapRegion;
+    type Vring = VringMutex<LoggedMemoryAtomic>;
+
+    fn num_queues(&self) -> usize {
+        NUM_QUEUES
+    }
+
+    fn max_queue_size(&self) -> usize {
+        QUEUE_SIZE
+    }
+
+    fn features(&self) -> u64 {
+        1 << VIRTIO_F_VERSION_1
+            | 1 << VIRTIO_RING_F_INDIRECT_DESC
+            | 1 << VIRTIO_RING_F_EVENT_IDX
+            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
+            | VhostUserVirtioFeatures::LOG_ALL.bits()
+    }
+
+    fn protocol_features(&self) -> VhostUserProtocolFeatures {
+        let mut protocol_features = VhostUserProtocolFeatures::MQ
+            | VhostUserProtocolFeatures::BACKEND_REQ
+            | VhostUserProtocolFeatures::BACKEND_SEND_FD
+            | VhostUserProtocolFeatures::REPLY_ACK
+            | VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS
+            | VhostUserProtocolFeatures::LOG_SHMFD
+            | VhostUserProtocolFeatures::DEVICE_STATE;
+
+        if self.tag.is_some() {
+            protocol_features |= VhostUserProtocolFeatures::CONFIG;
+        }
+
+        protocol_features
+    }
+
+    fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
+        // virtio spec 1.2, 5.11.4:
+        //   The tag is encoded in UTF-8 and padded with NUL bytes if shorter than
+        //   the available space. This field is not NUL-terminated if the encoded
+        //   bytes take up the entire field.
+        // The length was already checked when parsing the arguments. Hence, we
+        // only assert that everything looks sane and pad with NUL bytes to the
+        // fixed length.
+        let tag = self.tag.as_ref().expect("Did not expect read of config if tag is not set. We do not advertise F_CONFIG in that case!");
+        assert!(tag.len() <= MAX_TAG_LEN, "too long tag length");
+        assert!(!tag.is_empty(), "tag should not be empty");
+        let mut fixed_len_tag = [0; MAX_TAG_LEN];
+        fixed_len_tag[0..tag.len()].copy_from_slice(tag.as_bytes());
+
+        let config = VirtioFsConfig {
+            tag: fixed_len_tag,
+            num_request_queues: Le32::from(REQUEST_QUEUES),
+        };
+
+        let offset = offset as usize;
+        let size = size as usize;
+        let mut result: Vec<_> = config
+            .as_slice()
+            .iter()
+            .skip(offset)
+            .take(size)
+            .copied()
+            .collect();
+        // pad with 0s up to `size`
+        result.resize(size, 0);
+        result
+    }
+
+    fn acked_features(&self, features: u64) {
+        if features & VhostUserVirtioFeatures::LOG_ALL.bits() != 0 {
+            // F_LOG_ALL set: Prepare for migration (unless we're already doing that)
+            let mut premigration_thread = self.premigration_thread.lock().unwrap();
+            if premigration_thread.is_none() {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let cloned_server = Arc::clone(&self.thread.read().unwrap().server);
+                let cloned_cancel = Arc::clone(&cancel);
+                let handle =
+                    thread::spawn(move || cloned_server.prepare_serialization(cloned_cancel));
+                *premigration_thread = Some(PremigrationThread { handle, cancel });
+            }
+        } else {
+            // F_LOG_ALL cleared: Migration cancelled, if any was ongoing
+            // (Note that this is our interpretation, and not said by the specification.  The back
+            // end might clear this flag also on the source side once the VM has been stopped, even
+            // before we receive SET_DEVICE_STATE_FD.  QEMU will clear F_LOG_ALL only when the VM
+            // is running, i.e. when the source resumes after a cancelled migration, which is
+            // exactly what we want, but it would be better if we had a more reliable way that is
+            // backed up by the spec.  We could delay cancelling until we receive a guest request
+            // while F_LOG_ALL is cleared, but that can take an indefinite amount of time.)
+            if let Some(premigration_thread) = self.premigration_thread.lock().unwrap().take() {
+                premigration_thread.cancel.store(true, Ordering::Relaxed);
+                // Ignore the result, we are cancelling anyway
+                let _ = premigration_thread.handle.join();
+            }
+        }
+    }
+
+    fn set_event_idx(&self, enabled: bool) {
+        self.thread.write().unwrap().event_idx = enabled;
+    }
+
+    fn update_memory(&self, mem: LoggedMemoryAtomic) -> io::Result<()> {
+        self.thread.write().unwrap().mem = Some(mem);
+        Ok(())
+    }
+
+    fn handle_event(
+        &self,
+        device_event: u16,
+        evset: EventSet,
+        vrings: &[VringMutex<LoggedMemoryAtomic>],
+        _thread_id: usize,
+    ) -> io::Result<()> {
+        if evset != EventSet::IN {
+            return Err(Error::HandleEventNotEpollIn.into());
+        }
+
+        let thread = self.thread.read().unwrap();
+
+        if thread.pool.is_some() {
+            thread.handle_event_pool(device_event, vrings)
+        } else {
+            thread.handle_event_serial(device_event, vrings)
+        }
+    }
+
+    fn exit_event(&self, _thread_index: usize) -> Option<EventFd> {
+        Some(self.thread.read().unwrap().kill_evt.try_clone().unwrap())
+    }
+
+    fn set_backend_req_fd(&self, vu_req: Backend) {
+        self.thread.write().unwrap().vu_req = Some(vu_req);
+    }
+
+    fn set_device_state_fd(
+        &self,
+        direction: VhostTransferStateDirection,
+        phase: VhostTransferStatePhase,
+        file: File,
+    ) -> io::Result<Option<File>> {
+        // Our caller (vhost-user-backend crate) pretty much ignores error objects we return (only
+        // cares whether we succeed or not), so log errors here
+        if let Err(err) = self.do_set_device_state_fd(direction, phase, file) {
+            error!("Failed to initiate state (de-)serialization: {err}");
+            return Err(err);
+        }
+        Ok(None)
+    }
+
+    fn check_device_state(&self) -> io::Result<()> {
+        // Our caller (vhost-user-backend crate) pretty much ignores error objects we return (only
+        // cares whether we succeed or not), so log errors here
+        if let Err(err) = self.do_check_device_state() {
+            error!("Migration failed: {err}");
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsBackend<F> {
+    fn do_set_device_state_fd(
+        &self,
+        direction: VhostTransferStateDirection,
+        phase: VhostTransferStatePhase,
+        file: File,
+    ) -> io::Result<()> {
+        if phase != VhostTransferStatePhase::STOPPED {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("Transfer in phase {:?} is not supported", phase),
+            ));
+        }
+
+        let server = Arc::clone(&self.thread.read().unwrap().server);
+        let join_handle = match direction {
+            VhostTransferStateDirection::SAVE => {
+                // We should have a premigration thread that was started with `F_LOG_ALL`.  It
+                // should already be finished, but you never know.
+                let premigration_thread = self.premigration_thread.lock().unwrap().take();
+
+                thread::spawn(move || {
+                    if let Some(premigration_thread) = premigration_thread {
+                        // Let’s hope it’s finished.  Otherwise, we block migration downtime for a
+                        // bit longer, but there’s nothing we can do.
+                        premigration_thread.handle.join().map_err(|_| {
+                            other_io_error(
+                                "Failed to finalize serialization preparation".to_string(),
+                            )
+                        })?;
+                    } else {
+                        // If we don’t have a premigration thread, that either means migration was
+                        // cancelled at some point (i.e. F_LOG_ALL cleared; very unlikely and we
+                        // consider sending SET_DEVICE_STATE_FD afterwards a protocol violation),
+                        // or that there simply was no F_LOG_ALL at all.  QEMU doesn’t necessarily
+                        // do memory logging when snapshotting, and in such cases we have no choice
+                        // but to just run preserialization now.
+                        warn!(
+                            "Front-end did not announce migration to begin, so we failed to \
+                            prepare for it; collecting data now.  If you are doing a snapshot, \
+                            that is OK; otherwise, migration downtime may be prolonged."
+                        );
+                        server.prepare_serialization(Arc::new(AtomicBool::new(false)));
+                    }
+
+                    server.serialize(file).map_err(|e| {
+                        io::Error::new(e.kind(), format!("Failed to save state: {}", e))
+                    })
+                })
+            }
+
+            VhostTransferStateDirection::LOAD => {
+                if let Some(premigration_thread) = self.premigration_thread.lock().unwrap().take() {
+                    // Strange, but OK
+                    premigration_thread.cancel.store(true, Ordering::Relaxed);
+                    warn!("Cancelling serialization preparation because of incoming migration");
+                    let _ = premigration_thread.handle.join();
+                }
+
+                thread::spawn(move || {
+                    server.deserialize_and_apply(file).map_err(|e| {
+                        io::Error::new(e.kind(), format!("Failed to load state: {}", e))
+                    })
+                })
+            }
+        };
+
+        *self.migration_thread.lock().unwrap() = Some(join_handle);
+
+        Ok(())
+    }
+
+    fn do_check_device_state(&self) -> io::Result<()> {
+        let Some(migration_thread) = self.migration_thread.lock().unwrap().take() else {
+            // `check_device_state()` must follow a successful `set_device_state_fd()`, so this is
+            // a protocol violation
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Front-end attempts to check migration state, but no migration has been done",
+            ));
+        };
+
+        migration_thread
+            .join()
+            .map_err(|_| other_io_error("Failed to join the migration thread"))?
+    }
+}
+
+impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> Drop
+    for VhostUserFsBackend<F>
+{
+    fn drop(&mut self) {
+        let result = self
+            .thread
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .kill_evt
+            .write(1);
+        if let Err(e) = result {
+            error!("Error shutting down worker thread: {:?}", e)
+        }
     }
 }
