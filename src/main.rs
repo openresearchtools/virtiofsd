@@ -2,12 +2,10 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-use futures::executor::{ThreadPool, ThreadPoolBuilder};
-use libc::EFD_NONBLOCK;
 use log::*;
 use passthrough::xattrmap::XattrMap;
 use std::collections::HashSet;
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::ffi::CString;
 use std::fs::File;
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -27,26 +25,21 @@ use vhost::vhost_user::Error::Disconnected;
 use vhost::vhost_user::{Backend, Listener};
 use vhost_user_backend::bitmap::BitmapMmapRegion;
 use vhost_user_backend::Error::HandleRequest;
-use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, VringMutex, VringState, VringT};
+use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, VringMutex};
 use virtio_bindings::bindings::virtio_config::*;
 use virtio_bindings::bindings::virtio_ring::{
     VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
-use virtio_queue::{DescriptorChain, QueueOwnedT};
-use virtiofsd::descriptor_utils::{Reader, Writer};
 use virtiofsd::filesystem::{FileSystem, SerializableFileSystem};
 use virtiofsd::passthrough::{
     self, CachePolicy, InodeFileHandlesMode, MigrationMode, MigrationOnError, PassthroughFs,
 };
 use virtiofsd::sandbox::{Sandbox, SandboxMode};
 use virtiofsd::seccomp::{enable_seccomp, SeccompAction};
-use virtiofsd::server::Server;
 use virtiofsd::util::{other_io_error, write_pid_file};
-use virtiofsd::vhost_user::{Error, MAX_TAG_LEN};
+use virtiofsd::vhost_user::{Error, VhostUserFsThread, MAX_TAG_LEN};
 use virtiofsd::{limits, oslib};
-use vm_memory::{
-    ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap, Le32,
-};
+use vm_memory::{ByteValued, GuestMemoryAtomic, GuestMemoryMmap, Le32};
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -61,275 +54,7 @@ const NUM_QUEUES: usize = REQUEST_QUEUES as usize + 1;
 type LoggedMemory = GuestMemoryMmap<BitmapMmapRegion>;
 type LoggedMemoryAtomic = GuestMemoryAtomic<LoggedMemory>;
 
-// The guest queued an available buffer for the high priority queue.
-const HIPRIO_QUEUE_EVENT: u16 = 0;
-// The guest queued an available buffer for the request queue.
-const REQ_QUEUE_EVENT: u16 = 1;
-
 type Result<T> = std::result::Result<T, Error>;
-
-struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
-    mem: Option<LoggedMemoryAtomic>,
-    kill_evt: EventFd,
-    server: Arc<Server<F>>,
-    // handle request from backend to frontend
-    vu_req: Option<Backend>,
-    event_idx: bool,
-    pool: Option<ThreadPool>,
-}
-
-impl<F: FileSystem + Send + Sync + 'static> Clone for VhostUserFsThread<F> {
-    fn clone(&self) -> Self {
-        VhostUserFsThread {
-            mem: self.mem.clone(),
-            kill_evt: self.kill_evt.try_clone().unwrap(),
-            server: self.server.clone(),
-            vu_req: self.vu_req.clone(),
-            event_idx: self.event_idx,
-            pool: self.pool.clone(),
-        }
-    }
-}
-
-impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsThread<F> {
-    fn new(fs: F, thread_pool_size: usize) -> Result<Self> {
-        let pool = if thread_pool_size > 0 {
-            // Test that unshare(CLONE_FS) works, it will be called for each thread.
-            // It's an unprivileged system call but some Docker/Moby versions are
-            // known to reject it via seccomp when CAP_SYS_ADMIN is not given.
-            //
-            // Note that the program is single-threaded here so this syscall has no
-            // visible effect and is safe to make.
-            let ret = unsafe { libc::unshare(libc::CLONE_FS) };
-            if ret == -1 {
-                return Err(Error::UnshareCloneFs(std::io::Error::last_os_error()));
-            }
-
-            Some(
-                ThreadPoolBuilder::new()
-                    .after_start(|_| {
-                        // unshare FS for xattr operation
-                        let ret = unsafe { libc::unshare(libc::CLONE_FS) };
-                        assert_eq!(ret, 0); // Should not fail
-                    })
-                    .pool_size(thread_pool_size)
-                    .create()
-                    .map_err(Error::CreateThreadPool)?,
-            )
-        } else {
-            None
-        };
-
-        Ok(VhostUserFsThread {
-            mem: None,
-            kill_evt: EventFd::new(EFD_NONBLOCK).map_err(Error::CreateKillEventFd)?,
-            server: Arc::new(Server::new(fs)),
-            vu_req: None,
-            event_idx: false,
-            pool,
-        })
-    }
-
-    fn return_descriptor(
-        vring_state: &mut VringState<LoggedMemoryAtomic>,
-        head_index: u16,
-        event_idx: bool,
-        len: usize,
-    ) {
-        let used_len: u32 = match len.try_into() {
-            Ok(l) => l,
-            Err(_) => panic!("Invalid used length, can't return used descritors to the ring"),
-        };
-
-        if vring_state.add_used(head_index, used_len).is_err() {
-            warn!("Couldn't return used descriptors to the ring");
-        }
-
-        if event_idx {
-            match vring_state.needs_notification() {
-                Err(_) => {
-                    warn!("Couldn't check if queue needs to be notified");
-                    vring_state.signal_used_queue().unwrap();
-                }
-                Ok(needs_notification) => {
-                    if needs_notification {
-                        vring_state.signal_used_queue().unwrap();
-                    }
-                }
-            }
-        } else {
-            vring_state.signal_used_queue().unwrap();
-        }
-    }
-
-    fn process_queue_pool(&self, vring: VringMutex<LoggedMemoryAtomic>) -> Result<bool> {
-        let mut used_any = false;
-        let atomic_mem = match &self.mem {
-            Some(m) => m,
-            None => return Err(Error::NoMemoryConfigured),
-        };
-
-        while let Some(avail_desc) = vring
-            .get_mut()
-            .get_queue_mut()
-            .iter(atomic_mem.memory())
-            .map_err(|_| Error::IterateQueue)?
-            .next()
-        {
-            used_any = true;
-
-            // Prepare a set of objects that can be moved to the worker thread.
-            let atomic_mem = atomic_mem.clone();
-            let server = self.server.clone();
-            let mut vu_req = self.vu_req.clone();
-            let event_idx = self.event_idx;
-            let worker_vring = vring.clone();
-            let worker_desc = avail_desc.clone();
-
-            self.pool.as_ref().unwrap().spawn_ok(async move {
-                let mem = atomic_mem.memory();
-                let head_index = worker_desc.head_index();
-
-                let reader = Reader::new(&mem, worker_desc.clone())
-                    .map_err(Error::QueueReader)
-                    .unwrap();
-                let writer = Writer::new(&mem, worker_desc.clone())
-                    .map_err(Error::QueueWriter)
-                    .unwrap();
-
-                let len = server
-                    .handle_message(reader, writer, vu_req.as_mut())
-                    .map_err(Error::ProcessQueue)
-                    .unwrap();
-
-                Self::return_descriptor(&mut worker_vring.get_mut(), head_index, event_idx, len);
-            });
-        }
-
-        Ok(used_any)
-    }
-
-    fn process_queue_serial(
-        &self,
-        vring_state: &mut VringState<LoggedMemoryAtomic>,
-    ) -> Result<bool> {
-        let mut used_any = false;
-        let mem = match &self.mem {
-            Some(m) => m.memory(),
-            None => return Err(Error::NoMemoryConfigured),
-        };
-        let mut vu_req = self.vu_req.clone();
-
-        let avail_chains: Vec<DescriptorChain<GuestMemoryLoadGuard<LoggedMemory>>> = vring_state
-            .get_queue_mut()
-            .iter(mem.clone())
-            .map_err(|_| Error::IterateQueue)?
-            .collect();
-
-        for chain in avail_chains {
-            used_any = true;
-
-            let head_index = chain.head_index();
-
-            let reader = Reader::new(&mem, chain.clone())
-                .map_err(Error::QueueReader)
-                .unwrap();
-            let writer = Writer::new(&mem, chain.clone())
-                .map_err(Error::QueueWriter)
-                .unwrap();
-
-            let len = self
-                .server
-                .handle_message(reader, writer, vu_req.as_mut())
-                .map_err(Error::ProcessQueue)
-                .unwrap();
-
-            Self::return_descriptor(vring_state, head_index, self.event_idx, len);
-        }
-
-        Ok(used_any)
-    }
-
-    fn handle_event_pool(
-        &self,
-        device_event: u16,
-        vrings: &[VringMutex<LoggedMemoryAtomic>],
-    ) -> io::Result<()> {
-        let idx = match device_event {
-            HIPRIO_QUEUE_EVENT => {
-                debug!("HIPRIO_QUEUE_EVENT");
-                0
-            }
-            REQ_QUEUE_EVENT => {
-                debug!("QUEUE_EVENT");
-                1
-            }
-            _ => return Err(Error::HandleEventUnknownEvent.into()),
-        };
-
-        if self.event_idx {
-            // vm-virtio's Queue implementation only checks avail_index
-            // once, so to properly support EVENT_IDX we need to keep
-            // calling process_queue() until it stops finding new
-            // requests on the queue.
-            loop {
-                vrings[idx].disable_notification().unwrap();
-                // we can't recover from an error here, so let's hope it's transient
-                if let Err(e) = self.process_queue_pool(vrings[idx].clone()) {
-                    error!("processing the vring {idx}: {e}");
-                }
-                if !vrings[idx].enable_notification().unwrap() {
-                    break;
-                }
-            }
-        } else {
-            // Without EVENT_IDX, a single call is enough.
-            self.process_queue_pool(vrings[idx].clone())?;
-        }
-
-        Ok(())
-    }
-
-    fn handle_event_serial(
-        &self,
-        device_event: u16,
-        vrings: &[VringMutex<LoggedMemoryAtomic>],
-    ) -> io::Result<()> {
-        let mut vring_state = match device_event {
-            HIPRIO_QUEUE_EVENT => {
-                debug!("HIPRIO_QUEUE_EVENT");
-                vrings[0].get_mut()
-            }
-            REQ_QUEUE_EVENT => {
-                debug!("QUEUE_EVENT");
-                vrings[1].get_mut()
-            }
-            _ => return Err(Error::HandleEventUnknownEvent.into()),
-        };
-
-        if self.event_idx {
-            // vm-virtio's Queue implementation only checks avail_index
-            // once, so to properly support EVENT_IDX we need to keep
-            // calling process_queue() until it stops finding new
-            // requests on the queue.
-            loop {
-                vring_state.disable_notification().unwrap();
-                // we can't recover from an error here, so let's hope it's transient
-                if let Err(e) = self.process_queue_serial(&mut vring_state) {
-                    error!("processing the vring: {e}");
-                }
-                if !vring_state.enable_notification().unwrap() {
-                    break;
-                }
-            }
-        } else {
-            // Without EVENT_IDX, a single call is enough.
-            self.process_queue_serial(&mut vring_state)?;
-        }
-
-        Ok(())
-    }
-}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
