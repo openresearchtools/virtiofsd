@@ -27,7 +27,7 @@ use virtiofsd::passthrough::{
 use virtiofsd::sandbox::{Sandbox, SandboxMode};
 use virtiofsd::seccomp::{enable_seccomp, SeccompAction};
 use virtiofsd::util::write_pid_file;
-use virtiofsd::vhost_user::{Error, VhostUserFsBackend, MAX_TAG_LEN};
+use virtiofsd::vhost_user::{Error, VhostUserFsBackendBuilder, MAX_TAG_LEN};
 use virtiofsd::{limits, oslib};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 
@@ -796,10 +796,14 @@ fn main() {
     };
 
     let fs_backend = Arc::new(
-        VhostUserFsBackend::new(fs, thread_pool_size, opt.tag).unwrap_or_else(|error| {
-            error!("Error creating vhost-user backend: {}", error);
-            process::exit(1)
-        }),
+        VhostUserFsBackendBuilder::default()
+            .set_thread_pool_size(thread_pool_size)
+            .set_tag(opt.tag)
+            .build(fs)
+            .unwrap_or_else(|error| {
+                error!("Error creating vhost-user backend: {}", error);
+                process::exit(1)
+            }),
     );
 
     let mut daemon = VhostUserDaemon::new(

@@ -401,6 +401,45 @@ struct PremigrationThread {
     cancel: Arc<AtomicBool>,
 }
 
+/// A builder for configurable creation of [`VhostUserFsBackend`] objects.
+#[derive(Debug, Default)]
+pub struct VhostUserFsBackendBuilder {
+    thread_pool_size: usize,
+    tag: Option<String>,
+}
+
+impl VhostUserFsBackendBuilder {
+    /// Adjust the size of the thread pool to use.
+    ///
+    /// A value of `0` disables the usage of a thread pool.
+    pub fn set_thread_pool_size(mut self, size: usize) -> Self {
+        self.thread_pool_size = size;
+        self
+    }
+
+    /// Set the tag to use for the file system.
+    ///
+    /// The tag length must not exceed [`MAX_TAG_LEN`] bytes.
+    pub fn set_tag(mut self, tag: Option<String>) -> Self {
+        self.tag = tag;
+        self
+    }
+
+    /// Build the [`VhostUserFsBackend`] object.
+    pub fn build<F>(self, fs: F) -> Result<VhostUserFsBackend<F>>
+    where
+        F: FileSystem + SerializableFileSystem + Send + Sync + 'static,
+    {
+        let thread = RwLock::new(VhostUserFsThread::new(fs, self.thread_pool_size)?);
+        Ok(VhostUserFsBackend {
+            thread,
+            premigration_thread: None.into(),
+            migration_thread: None.into(),
+            tag: self.tag,
+        })
+    }
+}
+
 pub struct VhostUserFsBackend<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> {
     thread: RwLock<VhostUserFsThread<F>>,
     premigration_thread: Mutex<Option<PremigrationThread>>,
@@ -409,14 +448,12 @@ pub struct VhostUserFsBackend<F: FileSystem + SerializableFileSystem + Send + Sy
 }
 
 impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsBackend<F> {
-    pub fn new(fs: F, thread_pool_size: usize, tag: Option<String>) -> Result<Self> {
-        let thread = RwLock::new(VhostUserFsThread::new(fs, thread_pool_size)?);
-        Ok(VhostUserFsBackend {
-            thread,
-            premigration_thread: None.into(),
-            migration_thread: None.into(),
-            tag,
-        })
+    /// Create a [`VhostUserFsBackend`] without a thread pool or a tag.
+    ///
+    /// For more configurable creation refer to
+    /// [`VhostUserFsBackendBuilder`].
+    pub fn new(fs: F) -> Result<Self> {
+        VhostUserFsBackendBuilder::default().build(fs)
     }
 }
 
