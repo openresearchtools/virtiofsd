@@ -351,6 +351,22 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
     }
 }
 
+impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> Drop
+    for VhostUserFsBackend<F>
+{
+    fn drop(&mut self) {
+        let result = self
+            .thread
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .kill_evt
+            .write(1);
+        if let Err(e) = result {
+            error!("Error shutting down worker thread: {:?}", e)
+        }
+    }
+}
+
 fn parse_seccomp(src: &str) -> std::result::Result<SeccompAction, &'static str> {
     Ok(match src {
         "none" => SeccompAction::Allow, // i.e. no seccomp
@@ -1141,16 +1157,5 @@ fn main() {
             HandleRequest(Disconnected) => info!("Client disconnected, shutting down"),
             _ => error!("Waiting for daemon failed: {:?}", e),
         }
-    }
-
-    let kill_evt = fs_backend
-        .thread
-        .read()
-        .unwrap()
-        .kill_evt
-        .try_clone()
-        .unwrap();
-    if let Err(e) = kill_evt.write(1) {
-        error!("Error shutting down worker thread: {:?}", e)
     }
 }
