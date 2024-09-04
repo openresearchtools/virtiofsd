@@ -67,7 +67,6 @@ const HIPRIO_QUEUE_EVENT: u16 = 0;
 const REQ_QUEUE_EVENT: u16 = 1;
 
 type Result<T> = std::result::Result<T, Error>;
-type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
 
 struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
     mem: Option<LoggedMemoryAtomic>,
@@ -255,7 +254,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
         &self,
         device_event: u16,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
-    ) -> VhostUserBackendResult<()> {
+    ) -> io::Result<()> {
         let idx = match device_event {
             HIPRIO_QUEUE_EVENT => {
                 debug!("HIPRIO_QUEUE_EVENT");
@@ -295,7 +294,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
         &self,
         device_event: u16,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
-    ) -> VhostUserBackendResult<()> {
+    ) -> io::Result<()> {
         let mut vring_state = match device_event {
             HIPRIO_QUEUE_EVENT => {
                 debug!("HIPRIO_QUEUE_EVENT");
@@ -480,7 +479,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
         self.thread.write().unwrap().event_idx = enabled;
     }
 
-    fn update_memory(&self, mem: LoggedMemoryAtomic) -> VhostUserBackendResult<()> {
+    fn update_memory(&self, mem: LoggedMemoryAtomic) -> io::Result<()> {
         self.thread.write().unwrap().mem = Some(mem);
         Ok(())
     }
@@ -491,7 +490,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
         evset: EventSet,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
         _thread_id: usize,
-    ) -> VhostUserBackendResult<()> {
+    ) -> io::Result<()> {
         if evset != EventSet::IN {
             return Err(Error::HandleEventNotEpollIn.into());
         }
