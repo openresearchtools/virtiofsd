@@ -21,6 +21,7 @@ pub mod sandbox;
 pub mod seccomp;
 pub mod server;
 pub mod util;
+pub mod vhost_user;
 
 use std::ffi::{FromBytesWithNulError, FromVecWithNulError};
 use std::{error, fmt, io};

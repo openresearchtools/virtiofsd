@@ -7,7 +7,7 @@ use libc::EFD_NONBLOCK;
 use log::*;
 use passthrough::xattrmap::XattrMap;
 use std::collections::HashSet;
-use std::convert::{self, TryFrom, TryInto};
+use std::convert::{TryFrom, TryInto};
 use std::ffi::CString;
 use std::fs::File;
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::{env, error, fmt, io, process};
+use std::{env, io, process};
 use virtiofsd::idmap::{GidMap, UidMap};
 
 use clap::{CommandFactory, Parser};
@@ -33,7 +33,7 @@ use virtio_bindings::bindings::virtio_ring::{
     VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
 use virtio_queue::{DescriptorChain, QueueOwnedT};
-use virtiofsd::descriptor_utils::{Error as VufDescriptorError, Reader, Writer};
+use virtiofsd::descriptor_utils::{Reader, Writer};
 use virtiofsd::filesystem::{FileSystem, SerializableFileSystem};
 use virtiofsd::passthrough::{
     self, CachePolicy, InodeFileHandlesMode, MigrationMode, MigrationOnError, PassthroughFs,
@@ -42,7 +42,8 @@ use virtiofsd::sandbox::{Sandbox, SandboxMode};
 use virtiofsd::seccomp::{enable_seccomp, SeccompAction};
 use virtiofsd::server::Server;
 use virtiofsd::util::{other_io_error, write_pid_file};
-use virtiofsd::{limits, oslib, Error as VhostUserFsError};
+use virtiofsd::vhost_user::{Error, MAX_TAG_LEN};
+use virtiofsd::{limits, oslib};
 use vm_memory::{
     ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap, Le32,
 };
@@ -65,68 +66,8 @@ const HIPRIO_QUEUE_EVENT: u16 = 0;
 // The guest queued an available buffer for the request queue.
 const REQ_QUEUE_EVENT: u16 = 1;
 
-const MAX_TAG_LEN: usize = 36;
-
 type Result<T> = std::result::Result<T, Error>;
 type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
-
-// The compiler warns that some wrapped values are never read, but they are in fact read by
-// `<Error as fmt::Display>::fmt()` via the derived `Debug`.
-#[allow(dead_code)]
-#[derive(Debug)]
-enum Error {
-    /// Failed to create kill eventfd.
-    CreateKillEventFd(io::Error),
-    /// Failed to create thread pool.
-    CreateThreadPool(io::Error),
-    /// Failed to handle event other than input event.
-    HandleEventNotEpollIn,
-    /// Failed to handle unknown event.
-    HandleEventUnknownEvent,
-    /// Iterating through the queue failed.
-    IterateQueue,
-    /// No memory configured.
-    NoMemoryConfigured,
-    /// Processing queue failed.
-    ProcessQueue(VhostUserFsError),
-    /// Creating a queue reader failed.
-    QueueReader(VufDescriptorError),
-    /// Creating a queue writer failed.
-    QueueWriter(VufDescriptorError),
-    /// The unshare(CLONE_FS) call failed.
-    UnshareCloneFs(io::Error),
-    /// Invalid tag name
-    InvalidTag,
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use self::Error::UnshareCloneFs;
-        match self {
-            UnshareCloneFs(error) => {
-                write!(
-                    f,
-                    "The unshare(CLONE_FS) syscall failed with '{error}'. \
-                    If running in a container please check that the container \
-                    runtime seccomp policy allows unshare."
-                )
-            }
-            Self::InvalidTag => write!(
-                f,
-                "The tag may not be empty or longer than {MAX_TAG_LEN} bytes (encoded as UTF-8)."
-            ),
-            _ => write!(f, "{self:?}"),
-        }
-    }
-}
-
-impl error::Error for Error {}
-
-impl convert::From<Error> for io::Error {
-    fn from(e: Error) -> Self {
-        other_io_error(e)
-    }
-}
 
 struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
     mem: Option<LoggedMemoryAtomic>,
