@@ -808,7 +808,7 @@ fn main() {
 
     let mut daemon = VhostUserDaemon::new(
         String::from("virtiofsd-backend"),
-        fs_backend.clone(),
+        fs_backend,
         GuestMemoryAtomic::new(GuestMemoryMmap::new()),
     )
     .unwrap();
