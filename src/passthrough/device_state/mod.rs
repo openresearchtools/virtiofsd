@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/**
+/*!
  * Module for migrating our internal FS state (i.e. serializing and deserializing it), with the
  * following submodules:
  * - serialized: Serialized data structures
@@ -13,6 +13,7 @@
  * - serialization: Functionality for serializing
  * - deserialization: Functionality for deserializing
  */
+
 mod deserialization;
 pub(super) mod preserialization;
 mod serialization;

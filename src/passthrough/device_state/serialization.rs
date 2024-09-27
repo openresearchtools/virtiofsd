@@ -2,9 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/// Serialization functionality (i.e. what happens in `SerializableFileSystem::serialize()`): Take
-/// information that we have collected during preserialization and turn it into actually
-/// serializable structs ('serialized' module), which are then turned into a plain vector of bytes.
+/*!
+ * Serialization functionality (i.e. what happens in `SerializableFileSystem::serialize()`): Take
+ * information that we have collected during preserialization and turn it into actually
+ * serializable structs ('serialized' module), which are then turned into a plain vector of bytes.
+ */
+
 use crate::fuse;
 use crate::passthrough::device_state::preserialization::{
     self, HandleMigrationInfo, InodeMigrationInfo,

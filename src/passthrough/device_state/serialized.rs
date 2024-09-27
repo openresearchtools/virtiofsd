@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/// Structs and enums that constitute our serialized state "on the wire".  Turning them into/from
-/// plain bytes still needs to be done with some serde implementation.
+/*!
+ * Structs and enums that constitute our serialized state "on the wire".  Turning them into/from
+ * plain bytes still needs to be done with some serde implementation.
+ */
+
 use crate::passthrough::file_handle::SerializableFileHandle;
 use crate::passthrough::inode_store::Inode as InodeId;
 use crate::passthrough::Handle as HandleId;
