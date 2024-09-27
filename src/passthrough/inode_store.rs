@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 pub type Inode = u64;
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct InodeIds {
+pub(crate) struct InodeIds {
     pub ino: libc::ino64_t,
     pub dev: libc::dev_t,
     pub mnt_id: MountId,
@@ -30,7 +30,7 @@ pub struct InodeIds {
 /// potentially remove the inode from the store (when the refcount reaches 0).
 /// Note that dropping this object locks its inode store, so care must be taken not to drop strong
 /// references while the inode store is locked, or to use `StrongInodeReference::drop_unlocked()`.
-pub struct StrongInodeReference {
+pub(crate) struct StrongInodeReference {
     /// Referenced inode's data.
     /// Is only `None` after the inode has been leaked, which cannot occur outside of `leak()` and
     /// `drop()`, because `leak()` consumes the object.
@@ -40,7 +40,7 @@ pub struct StrongInodeReference {
     inode_store: Arc<RwLock<InodeStoreInner>>,
 }
 
-pub struct InodeData {
+pub(crate) struct InodeData {
     pub inode: Inode,
     // Most of these aren't actually files but ¯\_(ツ)_/¯.
     pub file_or_handle: FileOrHandle,
@@ -70,7 +70,7 @@ pub struct InodeData {
  * object's lifetime is static, or it may reference `InodeData.file` (the `Ref` variant), in which
  * case the object's lifetime is that of the respective `InodeData` object.
  */
-pub enum InodeFile<'inode_lifetime> {
+pub(crate) enum InodeFile<'inode_lifetime> {
     Owned(File),
     Ref(&'inode_lifetime File),
 }
@@ -83,7 +83,7 @@ struct InodeStoreInner {
 }
 
 #[derive(Default)]
-pub struct InodeStore {
+pub(crate) struct InodeStore {
     inner: Arc<RwLock<InodeStoreInner>>,
 }
 
@@ -93,7 +93,7 @@ pub struct InodeStore {
  * Does not keep the store locked between `next()` calls, and will return inodes added while
  * iterating.
  */
-pub struct InodeIterator<'a> {
+pub(crate) struct InodeIterator<'a> {
     /// Inode store.
     store: &'a InodeStore,
 
@@ -343,22 +343,6 @@ impl InodeStore {
         self.inner.read().unwrap().get(inode).cloned()
     }
 
-    pub fn get_by_ids(&self, ids: &InodeIds) -> Option<Arc<InodeData>> {
-        self.inner.read().unwrap().get_by_ids(ids).cloned()
-    }
-
-    pub fn get_by_handle(&self, handle: &FileHandle) -> Option<Arc<InodeData>> {
-        self.inner.read().unwrap().get_by_handle(handle).cloned()
-    }
-
-    pub fn inode_by_ids(&self, ids: &InodeIds) -> Option<Inode> {
-        self.inner.read().unwrap().inode_by_ids(ids)
-    }
-
-    pub fn inode_by_handle(&self, handle: &FileHandle) -> Option<Inode> {
-        self.inner.read().unwrap().inode_by_handle(handle)
-    }
-
     /**
      * Iterate over every inode that we have in the store.
      *
@@ -476,10 +460,6 @@ impl InodeStore {
         }
         inner.insert_new(Arc::new(inode_data));
         Ok(())
-    }
-
-    pub fn remove(&self, inode: Inode) {
-        self.inner.write().unwrap().remove(inode);
     }
 
     pub fn forget_one(&self, inode: Inode, count: u64) {

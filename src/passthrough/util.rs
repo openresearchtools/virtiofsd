@@ -60,7 +60,10 @@ pub fn einval() -> io::Error {
 }
 
 /// Looks up an FD's path through /proc/self/fd
-pub fn get_path_by_fd(fd: &impl AsRawFd, proc_self_fd: &impl AsRawFd) -> io::Result<CString> {
+pub(crate) fn get_path_by_fd(
+    fd: &impl AsRawFd,
+    proc_self_fd: &impl AsRawFd,
+) -> io::Result<CString> {
     let fname = format!("{}\0", fd.as_raw_fd());
     let fname_cstr = CStr::from_bytes_with_nul(fname.as_bytes()).unwrap();
 
