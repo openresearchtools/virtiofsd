@@ -153,12 +153,8 @@ Enable support for security label (SELinux).
 Always preserve `O_NOATIME`.
 
 By default virtiofsd will implicitly clean up `O_NOATIME` to prevent potential
-permission errors when it does not have the right capabilities to access all
-the exported files (typically when running as unprivileged user and with
-`--sandbox none`, that means it won't have the `CAP_FOWNER` capability set).
-
-The option `--preserve-noatime` can be used to override this behavior and
-preserve the `O_NOATIME` flag specified by the client.
+permission errors. The option `--preserve-noatime` can be used to override this
+behavior and preserve the `O_NOATIME` flag specified by the client.
 
 #### Options
 ```shell
