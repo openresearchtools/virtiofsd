@@ -5,21 +5,23 @@ use crate::fuse;
 use crate::passthrough::device_state::preserialization::InodeMigrationInfo;
 use crate::passthrough::file_handle::{FileHandle, FileOrHandle};
 use crate::passthrough::stat::MountId;
-use crate::passthrough::util::{ebadf, get_path_by_fd, is_safe_inode, reopen_fd_through_proc};
+use crate::passthrough::util::{
+    ebadf, get_path_by_fd, is_safe_inode, reopen_fd_through_proc, FdPathError,
+};
 use crate::util::other_io_error;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::File;
-use std::io;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::{fmt, io};
 
 pub type Inode = u64;
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct InodeIds {
+pub(crate) struct InodeIds {
     pub ino: libc::ino64_t,
     pub dev: libc::dev_t,
     pub mnt_id: MountId,
@@ -30,7 +32,7 @@ pub struct InodeIds {
 /// potentially remove the inode from the store (when the refcount reaches 0).
 /// Note that dropping this object locks its inode store, so care must be taken not to drop strong
 /// references while the inode store is locked, or to use `StrongInodeReference::drop_unlocked()`.
-pub struct StrongInodeReference {
+pub(crate) struct StrongInodeReference {
     /// Referenced inode's data.
     /// Is only `None` after the inode has been leaked, which cannot occur outside of `leak()` and
     /// `drop()`, because `leak()` consumes the object.
@@ -40,7 +42,7 @@ pub struct StrongInodeReference {
     inode_store: Arc<RwLock<InodeStoreInner>>,
 }
 
-pub struct InodeData {
+pub(crate) struct InodeData {
     pub inode: Inode,
     // Most of these aren't actually files but ¯\_(ツ)_/¯.
     pub file_or_handle: FileOrHandle,
@@ -70,7 +72,7 @@ pub struct InodeData {
  * object's lifetime is static, or it may reference `InodeData.file` (the `Ref` variant), in which
  * case the object's lifetime is that of the respective `InodeData` object.
  */
-pub enum InodeFile<'inode_lifetime> {
+pub(crate) enum InodeFile<'inode_lifetime> {
     Owned(File),
     Ref(&'inode_lifetime File),
 }
@@ -83,8 +85,47 @@ struct InodeStoreInner {
 }
 
 #[derive(Default)]
-pub struct InodeStore {
+pub(crate) struct InodeStore {
     inner: Arc<RwLock<InodeStoreInner>>,
+}
+
+/**
+ * Iterates over the inode store.
+ *
+ * Does not keep the store locked between `next()` calls, and will return inodes added while
+ * iterating.
+ */
+pub(crate) struct InodeIterator<'a> {
+    /// Inode store.
+    store: &'a InodeStore,
+
+    /**
+     * Last inode ID returned through `next()`.
+     *
+     * We visit inodes in numerical order of their ID, and because new IDs added to the store are
+     * always greater than all previous IDs, all remaining IDs to visit must be greater than this
+     * one.
+     */
+    last_inode: Option<Inode>,
+}
+
+/**
+ * Errors that `InodeData::get_path()` can encounter.
+ *
+ * This specialized error type exists so that
+ * [`crate::passthrough::device_state::preserialization::proc_paths`] can decide which errors it
+ * considers recoverable.
+ */
+#[derive(Debug)]
+pub(crate) enum InodePathError {
+    /// Failed to get an FD for this inode.
+    NoFd(io::Error),
+
+    /// `util::get_path_by_fd()` failed.
+    FdPathError(FdPathError),
+
+    /// Path reported by `util::get_path_by_fd()` is outside of the shared directory.
+    OutsideRoot,
 }
 
 impl<'a> InodeData {
@@ -104,16 +145,14 @@ impl<'a> InodeData {
     }
 
     /// Try to obtain this inode's path through /proc/self/fd
-    pub fn get_path(&self, proc_self_fd: &File) -> io::Result<CString> {
-        let path = get_path_by_fd(&self.get_file()?, proc_self_fd)?;
+    pub fn get_path(&self, proc_self_fd: &File) -> Result<CString, InodePathError> {
+        let fd = self.get_file().map_err(InodePathError::NoFd)?;
+        let path = get_path_by_fd(&fd, proc_self_fd).map_err(InodePathError::FdPathError)?;
 
         // Kernel will report nodes beyond our root as having path / -- but only the root node (the
         // shared directory) can actually have that path, so for others, it must be inaccurate
         if path.as_bytes() == b"/" && self.inode != fuse::ROOT_ID {
-            return Err(other_io_error(
-                "Got empty path for non-root node, so it is outside the shared directory"
-                    .to_string(),
-            ));
+            return Err(InodePathError::OutsideRoot);
         }
 
         Ok(path)
@@ -323,26 +362,17 @@ impl InodeStore {
         self.inner.read().unwrap().get(inode).cloned()
     }
 
-    pub fn get_by_ids(&self, ids: &InodeIds) -> Option<Arc<InodeData>> {
-        self.inner.read().unwrap().get_by_ids(ids).cloned()
-    }
-
-    pub fn get_by_handle(&self, handle: &FileHandle) -> Option<Arc<InodeData>> {
-        self.inner.read().unwrap().get_by_handle(handle).cloned()
-    }
-
-    pub fn inode_by_ids(&self, ids: &InodeIds) -> Option<Inode> {
-        self.inner.read().unwrap().inode_by_ids(ids)
-    }
-
-    pub fn inode_by_handle(&self, handle: &FileHandle) -> Option<Inode> {
-        self.inner.read().unwrap().inode_by_handle(handle)
-    }
-
-    /// Invoke `func()` on each inode, collect all results, and return them.  Note that the inode
-    /// store is read-locked when `func()` is called.
-    pub fn map<V, F: Fn(&Arc<InodeData>) -> V>(&self, func: F) -> Vec<V> {
-        self.inner.read().unwrap().data.values().map(func).collect()
+    /**
+     * Iterate over every inode that we have in the store.
+     *
+     * Does not keep the store locked between `next()` calls, and will return inodes added while
+     * iterating.
+     */
+    pub fn iter(&self) -> InodeIterator<'_> {
+        InodeIterator {
+            store: self,
+            last_inode: None,
+        }
     }
 
     /// Turn the weak reference `inode` into a strong one (increments its refcount)
@@ -449,10 +479,6 @@ impl InodeStore {
         }
         inner.insert_new(Arc::new(inode_data));
         Ok(())
-    }
-
-    pub fn remove(&self, inode: Inode) {
-        self.inner.write().unwrap().remove(inode);
     }
 
     pub fn forget_one(&self, inode: Inode, count: u64) {
@@ -625,3 +651,48 @@ impl Drop for InodeStore {
         self.inner.write().unwrap().clear();
     }
 }
+
+impl Iterator for InodeIterator<'_> {
+    type Item = Arc<InodeData>;
+
+    fn next(&mut self) -> Option<Arc<InodeData>> {
+        let store = self.store.inner.read().unwrap();
+
+        // Find the inode with the lowest ID after `last_inode`.
+        // Note that iterators over `BTreeMap` return keys in numerical order, so
+        // `range(x..).next()` will always return the inode with the lowest ID greater than or
+        // equal to `x` (if any).
+        let lower_bound = self.last_inode.map(|last_id| last_id + 1).unwrap_or(0);
+        let (inode_id, inode_data) = store.data.range(lower_bound..).next()?;
+
+        self.last_inode = Some(*inode_id);
+        Some(Arc::clone(inode_data))
+    }
+}
+
+impl From<InodePathError> for io::Error {
+    fn from(err: InodePathError) -> Self {
+        match err {
+            InodePathError::NoFd(err) => err,
+            InodePathError::FdPathError(err) => err.into(),
+            InodePathError::OutsideRoot => other_io_error(
+                "Got empty path for non-root node, so it is outside the shared directory",
+            ),
+        }
+    }
+}
+
+impl fmt::Display for InodePathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InodePathError::NoFd(err) => write!(f, "{err}"),
+            InodePathError::FdPathError(err) => write!(f, "{err}"),
+            InodePathError::OutsideRoot => write!(
+                f,
+                "Got empty path for non-root node, so it is outside the shared directory",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InodePathError {}

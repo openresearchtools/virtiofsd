@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/**
+/*!
  * Module for migrating our internal FS state (i.e. serializing and deserializing it), with the
  * following submodules:
  * - serialized: Serialized data structures
@@ -13,6 +13,7 @@
  * - serialization: Functionality for serializing
  * - deserialization: Functionality for deserializing
  */
+
 mod deserialization;
 pub(super) mod preserialization;
 mod serialization;
@@ -20,7 +21,8 @@ mod serialized;
 
 use crate::filesystem::SerializableFileSystem;
 use crate::passthrough::PassthroughFs;
-use preserialization::{find_paths, InodeMigrationInfoConstructor};
+use preserialization::find_paths;
+use preserialization::proc_paths::{self, ConfirmPaths, ImplicitPathCheck};
 use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -39,13 +41,36 @@ impl SerializableFileSystem for PassthroughFs {
         self.track_migration_info.store(true, Ordering::Relaxed);
 
         // Create the reconstructor (which reconstructs parent+filename information for each node
-        // in our inode store), and run it
-        let reconstructor = find_paths::Constructor::new(self, cancel);
-        reconstructor.execute();
+        // in our inode store), and run it.  Try the proc_paths module first, if that advises us to
+        // fall back, try find_paths second.
+        if proc_paths::Constructor::new(self, Arc::clone(&cancel)).execute() {
+            warn!("Falling back to iterating through the shared directory to reconstruct paths for migration");
+            find_paths::Constructor::new(self, Arc::clone(&cancel)).execute();
+        }
+
+        // Check reconstructed paths once.  This is to rule out TOCTTOU problems, specifically the
+        // following:
+        // 1. Our preserialization constructor above finds a path for some inode
+        // 2. That inode is concurrently unlinked by the guest, so its inode migration info is
+        //    invalidated
+        // 3. The preserialization constructor then constructs an inode migration info with the
+        //    path it found (that is now wrong), adding it to the inode
+        // To fix this problem, preserialization must re-check each path after putting it into the
+        // `InodeData.migration_info` field.  Do that by running the proc_paths checker.
+        let checker = ImplicitPathCheck::new(self, cancel);
+        checker.check_paths();
     }
 
     fn serialize(&self, mut state_pipe: File) -> io::Result<()> {
         self.track_migration_info.store(false, Ordering::Relaxed);
+
+        if self.cfg.migration_confirm_paths {
+            let checker = ConfirmPaths::new(self);
+            if let Err(err) = checker.confirm_paths() {
+                self.inodes.clear_migration_info();
+                return Err(err);
+            }
+        }
 
         let state = serialized::PassthroughFs::V1(self.try_into()?);
         self.inodes.clear_migration_info();

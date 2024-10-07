@@ -2,17 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::{InodeLocation, InodeMigrationInfo, InodeMigrationInfoConstructor};
+use super::{InodeLocation, InodeMigrationInfo};
 use crate::filesystem::DirectoryIterator;
 use crate::fuse;
-use crate::passthrough::file_handle::FileHandle;
+use crate::passthrough::file_handle::{FileHandle, SerializableFileHandle};
 use crate::passthrough::inode_store::{InodeData, InodeIds, StrongInodeReference};
 use crate::passthrough::stat::statx;
 use crate::passthrough::{FileOrHandle, PassthroughFs};
 use crate::read_dir::ReadDir;
-use crate::util::other_io_error;
-use std::convert::TryInto;
-use std::ffi::CStr;
+use crate::util::{other_io_error, ResultErrorContext};
+use std::convert::{TryFrom, TryInto};
+use std::ffi::{CStr, CString};
+use std::fmt::{self, Display};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -53,11 +54,73 @@ impl InodePath {
     pub(super) fn for_each_strong_reference<F: FnMut(StrongInodeReference)>(self, mut f: F) {
         f(self.parent);
     }
+
+    /// Checker whether the associated inode (`inode_data`) is present under this path, returning
+    /// an error if (and only if) it is not.
+    pub(super) fn check_presence(
+        &self,
+        inode_data: &InodeData,
+        full_info: &InodeMigrationInfo,
+    ) -> io::Result<()> {
+        let filename = CString::new(self.filename.clone())?;
+        let parent_fd = self.parent.get().get_file()?;
+        let st = statx(&parent_fd, Some(&filename))?;
+
+        if st.st.st_dev != inode_data.ids.dev {
+            return Err(other_io_error(format!(
+                "Device ID differs: Expected {}, found {}",
+                inode_data.ids.dev, st.st.st_dev
+            )));
+        }
+
+        // Try to take a file handle from the migration info; if none is there, try to generate it
+        // (but ignore errors, falling back to checking the inode ID).  We do really want to check
+        // the file handle if possible, though, to detect inode ID reuse.
+        let (fh, fh_ref) = if let Some(fh_ref) = full_info.file_handle.as_ref() {
+            (None, Some(fh_ref))
+        } else if let Ok(fh) = SerializableFileHandle::try_from(&inode_data.file_or_handle) {
+            (Some(fh), None)
+        } else {
+            (None, None)
+        };
+        if let Some(fh) = fh_ref.or(fh.as_ref()) {
+            // If we got a file handle for `inode_data`, failing to get it for `filename` probably
+            // means it is a different inode.  Be cautious and return an error then.
+            let actual_fh = FileHandle::from_name_at_fail_hard(&parent_fd, &filename)
+                .err_context(|| "Failed to generate file handle")?;
+            // Ignore mount ID: A file handle can be in two different mount IDs, but as long as it
+            // is on the same device, it is still the same mount ID; and we have already checked
+            // the device ID.
+            fh.require_equal_without_mount_id(&actual_fh.into())
+                .map_err(other_io_error)
+        } else {
+            // Cannot generate file handle?  Fall back to just the inode ID.
+            if st.st.st_ino != inode_data.ids.ino {
+                return Err(other_io_error(format!(
+                    "Inode ID differs: Expected {}, found {}",
+                    inode_data.ids.ino, st.st.st_ino
+                )));
+            }
+            Ok(())
+        }
+    }
 }
 
 impl From<InodePath> for InodeLocation {
     fn from(path: InodePath) -> Self {
         InodeLocation::Path(path)
+    }
+}
+
+impl Display for InodePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parent = self.parent.get();
+        let parent_mig_info_locked = parent.migration_info.lock().unwrap();
+        if let Some(parent_mig_info) = parent_mig_info_locked.as_ref() {
+            write!(f, "{}/{}", parent_mig_info.location, self.filename)
+        } else {
+            write!(f, "[inode {}]/{}", parent.inode, self.filename)
+        }
     }
 }
 
@@ -68,6 +131,25 @@ impl From<InodePath> for InodeLocation {
 impl<'a> Constructor<'a> {
     pub fn new(fs: &'a PassthroughFs, cancel: Arc<AtomicBool>) -> Self {
         Constructor { fs, cancel }
+    }
+
+    /**
+     * Collect paths for all inodes in our inode store, during preserialization.
+     *
+     * Recurse from the root directory (the shared directory), constructing `InodeMigrationInfo`
+     * data for every inode in the inode store.  This may take a long time, which is why it is done
+     * in the preserialization phase.
+     *
+     * Cannot fail: Collecting inodes’ migration info is supposed to be a best-effort operation.
+     * We can leave any and even all inodes’ migration info empty, then serialize them as invalid
+     * inodes, and let the destination decide what to do based on its --migration-on-error setting.
+     */
+    pub fn execute(self) {
+        // Only need to do something if we have a root node to recurse from; otherwise the
+        // filesystem is not mounted and we do not need to do anything.
+        if let Ok(root) = self.fs.inodes.get_strong(fuse::ROOT_ID) {
+            self.recurse_from(root);
+        }
     }
 
     /// Recurse from the given directory inode
@@ -226,16 +308,5 @@ impl<'a> Constructor<'a> {
         };
 
         Ok(Some(self.fs.inodes.get_or_insert(new_inode)?))
-    }
-}
-
-impl InodeMigrationInfoConstructor for Constructor<'_> {
-    /// Recurse from the root directory (the shared directory)
-    fn execute(self) {
-        // Only need to do something if we have a root node to recurse from; otherwise the
-        // filesystem is not mounted and we do not need to do anything.
-        if let Ok(root) = self.fs.inodes.get_strong(fuse::ROOT_ID) {
-            self.recurse_from(root);
-        }
     }
 }

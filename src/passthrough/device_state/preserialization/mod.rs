@@ -3,13 +3,15 @@
 // found in the LICENSE file.
 
 use crate::passthrough::file_handle::{FileOrHandle, SerializableFileHandle};
-use crate::passthrough::inode_store::StrongInodeReference;
+use crate::passthrough::inode_store::{InodeData, StrongInodeReference};
 use crate::passthrough::{self, MigrationMode};
 use std::convert::TryInto;
 use std::ffi::CStr;
+use std::fmt::{self, Display};
 use std::io;
 
 pub mod find_paths;
+pub mod proc_paths;
 
 /// Precursor to `serialized::Inode` that is constructed while serialization is being prepared, and
 /// will then be transformed into the latter at the time of serialization.  To be stored in the
@@ -41,18 +43,6 @@ pub(in crate::passthrough) enum InodeLocation {
 pub(in crate::passthrough) enum HandleMigrationInfo {
     /// Handle can be opened by opening its associated inode with the given `open(2)` flags
     OpenInode { flags: i32 },
-}
-
-/// Constructs `InodeMigrationInfo` data for every inode in the inode store.  This may take a long
-/// time, and is the core part of our preserialization phase.
-/// Different implementations of this trait can create different variants of the
-/// `InodeMigrationInfo` enum.
-pub(super) trait InodeMigrationInfoConstructor {
-    /// Runs the constructor.  Must not fail: Collecting inodes’ migration info is supposed to be a
-    /// best-effort operation.  We can leave any and even all inodes’ migration info empty, then
-    /// serialize them as invalid inodes, and let the destination decide what to do based on its
-    /// --migration-on-error setting.
-    fn execute(self);
 }
 
 impl InodeMigrationInfo {
@@ -107,6 +97,43 @@ impl InodeMigrationInfo {
         match self.location {
             InodeLocation::RootNode => (),
             InodeLocation::Path(p) => p.for_each_strong_reference(f),
+        }
+    }
+
+    /**
+     * Return `true` if this migration info contains a path.
+     *
+     * If so, when the associated inode’s path is modified or invalidated (e.g. renamed, moved,
+     * unlinked), its migration info must then be updated or invalidated accordingly.
+     */
+    pub fn has_path(&self) -> bool {
+        // Use `match` instead of `matches!()` so we don’t forget any potential future variants
+        match &self.location {
+            InodeLocation::RootNode => false,
+            InodeLocation::Path(_) => true,
+        }
+    }
+
+    /**
+     * Assuming this migration info contains a path, check whether the associated inode (given
+     * through `inode_data`) is indeed present under that path, returning an error if (and only if)
+     * it is not.
+     *
+     * Always return `Ok(())` if this migration info’s location is not defined by a path.
+     */
+    pub fn check_path_presence(&self, inode_data: &InodeData) -> io::Result<()> {
+        match &self.location {
+            InodeLocation::RootNode => Ok(()),
+            InodeLocation::Path(p) => p.check_presence(inode_data, self),
+        }
+    }
+}
+
+impl Display for InodeLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InodeLocation::RootNode => write!(f, "[shared directory root]"),
+            InodeLocation::Path(p) => write!(f, "{p}"),
         }
     }
 }

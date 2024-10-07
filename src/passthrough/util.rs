@@ -1,11 +1,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
-use crate::util::other_io_error;
+use crate::util::{other_io_error, ErrorContext};
 use std::ffi::{CStr, CString};
 use std::fs::File;
-use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::{fmt, io};
 
 /// Safe wrapper around libc::openat().
 pub fn openat(dir_fd: &impl AsRawFd, path: &str, flags: libc::c_int) -> io::Result<File> {
@@ -59,8 +59,36 @@ pub fn einval() -> io::Error {
     io::Error::from_raw_os_error(libc::EINVAL)
 }
 
+/**
+ * Errors that `get_path_by_fd()` can encounter.
+ *
+ * This specialized error type exists so that
+ * [`crate::passthrough::device_state::preserialization::proc_paths`] can decide which errors it
+ * considers recoverable.
+ */
+#[derive(Debug)]
+pub(crate) enum FdPathError {
+    /// `readlinkat()` failed with the contained error.
+    ReadLink(io::Error),
+
+    /// Link name is too long.
+    TooLong,
+
+    /// Link name is not a valid C string.
+    InvalidCString(io::Error),
+
+    /// Returned path (contained string) is not a plain file path.
+    NotAFile(String),
+
+    /// Returned path (contained string) is reported to be deleted, i.e. no longer valid.
+    Deleted(String),
+}
+
 /// Looks up an FD's path through /proc/self/fd
-pub fn get_path_by_fd(fd: &impl AsRawFd, proc_self_fd: &impl AsRawFd) -> io::Result<CString> {
+pub(crate) fn get_path_by_fd(
+    fd: &impl AsRawFd,
+    proc_self_fd: &impl AsRawFd,
+) -> Result<CString, FdPathError> {
     let fname = format!("{}\0", fd.as_raw_fd());
     let fname_cstr = CStr::from_bytes_with_nul(fname.as_bytes()).unwrap();
 
@@ -76,26 +104,53 @@ pub fn get_path_by_fd(fd: &impl AsRawFd, proc_self_fd: &impl AsRawFd) -> io::Res
         )
     };
     if ret < 0 {
-        return Err(io::Error::last_os_error());
+        return Err(FdPathError::ReadLink(io::Error::last_os_error()));
     } else if ret as usize == max_len {
-        return Err(other_io_error("Path too long".to_string()));
+        return Err(FdPathError::TooLong);
     }
 
     link_target.truncate(ret as usize + 1);
-    let link_target_cstring = CString::from_vec_with_nul(link_target).map_err(other_io_error)?;
+    let link_target_cstring = CString::from_vec_with_nul(link_target)
+        .map_err(|err| FdPathError::InvalidCString(other_io_error(err)))?;
     let link_target_str = link_target_cstring.to_string_lossy();
 
     let pre_slash = link_target_str.split('/').next().unwrap();
     if pre_slash.contains(':') {
-        return Err(other_io_error("Not a file".to_string()));
+        return Err(FdPathError::NotAFile(link_target_str.into_owned()));
     }
 
-    if link_target_str.ends_with(" (deleted)") {
-        return Err(other_io_error("Inode deleted".to_string()));
+    if let Some(path) = link_target_str.strip_suffix(" (deleted)") {
+        return Err(FdPathError::Deleted(path.to_owned()));
     }
 
     Ok(link_target_cstring)
 }
+
+impl From<FdPathError> for io::Error {
+    fn from(err: FdPathError) -> Self {
+        match err {
+            FdPathError::ReadLink(err) => err.context("readlink"),
+            FdPathError::TooLong => other_io_error("Path returned from readlink is too long"),
+            FdPathError::InvalidCString(err) => err.context("readlink returned invalid path"),
+            FdPathError::NotAFile(path) => other_io_error(format!("Not a file ({path})")),
+            FdPathError::Deleted(path) => other_io_error(format!("Inode deleted ({path})")),
+        }
+    }
+}
+
+impl fmt::Display for FdPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FdPathError::ReadLink(err) => write!(f, "readlink: {err}"),
+            FdPathError::TooLong => write!(f, "Path returned from readlink is too long"),
+            FdPathError::InvalidCString(err) => write!(f, "readlink returned invalid path: {err}"),
+            FdPathError::NotAFile(path) => write!(f, "Not a file ({path})"),
+            FdPathError::Deleted(path) => write!(f, "Inode deleted ({path})"),
+        }
+    }
+}
+
+impl std::error::Error for FdPathError {}
 
 /// Debugging helper function: Turn the given file descriptor into a string representation we can
 /// show the user.  If `proc_self_fd` is given, try to obtain the actual path through the symlink

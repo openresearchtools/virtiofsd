@@ -2,10 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/// Deserialization functionality (i.e. what happens in
-/// `SerializableFileSystem::deserialize_and_apply()`): Take a plain vector of bytes, deserialize
-/// it into our serializable structs ('serialized' module), and then apply the information from
-/// there to a `PassthroughFs`, restoring the state from the migration source.
+/*!
+ * Deserialization functionality (i.e. what happens in
+ * `SerializableFileSystem::deserialize_and_apply()`): Take a plain vector of bytes, deserialize
+ * it into our serializable structs ('serialized' module), and then apply the information from
+ * there to a `PassthroughFs`, restoring the state from the migration source.
+ */
+
 use crate::fuse;
 use crate::passthrough::device_state::preserialization::HandleMigrationInfo;
 use crate::passthrough::device_state::serialized;

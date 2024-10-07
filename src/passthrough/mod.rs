@@ -17,12 +17,15 @@ use crate::filesystem::{
     SecContext, SetattrValid, SetxattrFlags, ZeroCopyReader, ZeroCopyWriter,
 };
 use crate::passthrough::credentials::{drop_effective_cap, UnixCredentials};
-use crate::passthrough::device_state::preserialization::{HandleMigrationInfo, InodeMigrationInfo};
+use crate::passthrough::device_state::preserialization::{
+    self, HandleMigrationInfo, InodeMigrationInfo,
+};
 use crate::passthrough::inode_store::{
     Inode, InodeData, InodeFile, InodeIds, InodeStore, StrongInodeReference,
 };
 use crate::passthrough::util::{ebadf, is_safe_inode, openat, reopen_fd_through_proc};
 use crate::read_dir::ReadDir;
+use crate::util::{other_io_error, ResultErrorContext};
 use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
 use mount_fd::{MPRError, MountFds};
@@ -172,8 +175,14 @@ impl FromStr for MigrationOnError {
 /// How to migrate our internal state to the destination instance
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MigrationMode {
-    /// Iterate through the shared directory to find paths for all inodes indexed and opened by the
-    /// guest, and transfer these paths to the destination.
+    /**
+     * Obtain paths for all inodes indexed and opened by the guest, and transfer those paths to
+     * the destination.
+     *
+     * To get those paths, we try to read the symbolic links in /proc/self/fd first; if that does
+     * not work, we will fall back to iterating through the shared directory (exhaustive search),
+     * enumerating all paths within.
+     */
     #[default]
     FindPaths,
 }
@@ -942,8 +951,12 @@ impl PassthroughFs {
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 
+        let invalidated_inode = self.before_invalidating_path(&data, name);
         // Safe because this doesn't modify any memory and we check the return value.
         let res = unsafe { libc::unlinkat(parent_file.as_raw_fd(), name.as_ptr(), flags) };
+        if let Some(invalidated_inode) = invalidated_inode {
+            self.after_invalidating_path(invalidated_inode, "Unlinked");
+        }
         if res == 0 {
             Ok(())
         } else {
@@ -1244,13 +1257,24 @@ impl PassthroughFs {
         parent_data: Arc<InodeData>,
         filename: &CStr,
     ) -> io::Result<()> {
+        if !self.track_migration_info.load(Ordering::Relaxed) {
+            // Not preparing for migration?  Nothing to do.
+            return Ok(());
+        }
+
         // We only need to update the node's migration info if we have it in our store
         if let Some(inode) = self.try_lookup(&parent_data, filename)? {
             let inode_data = inode.get();
             let parent_strong_ref = StrongInodeReference::new_with_data(parent_data, &self.inodes)?;
             let mut info_locked = inode_data.migration_info.lock().unwrap();
             // Unconditionally clear any potentially existing path, because it will be outdated
-            info_locked.take();
+            if let Some(info) = info_locked.take() {
+                if !info.has_path() {
+                    // We have some migration info, but it is not path-based?  Keep it then.
+                    *info_locked = Some(info);
+                    return Ok(());
+                }
+            }
             *info_locked = Some(InodeMigrationInfo::new(
                 &self.cfg,
                 parent_strong_ref,
@@ -1260,6 +1284,111 @@ impl PassthroughFs {
         }
 
         Ok(())
+    }
+
+    /**
+     * Prepare for a path to be invalidated (e.g. by overwriting or unlinking), which can be
+     * relevant to migration.
+     *
+     * If there is an inode in our inode store on the given path, return it.  If so, the caller
+     * must call `after_invalidating_path()` after the invalidating operation is done.
+     *
+     * Background: When an inode's path is invalidated (while preparing for migration), e.g.
+     * because it is unlinked or overwritten by a different inode, its migration info must too be
+     * invalidated so we do not transmit a wrong path to the destination.  While we must look for
+     * the inode before the invalidating operation (lest it is gone), we must invalidate its
+     * migration info only *after* that operation, or we’d have a TOCTTOU problem.  Consider this
+     * order of execution:
+     * 1. We invalidate the path in the migration info (before executing the operation)
+     * 2. Preserialization process runs in the background; before the operation is done, it finds
+     *    the still-existing (old) inode, re-setting the migration info's path to the one we just
+     *    cleared
+     * 3. Operation executes, making that path point to a different inode
+     *
+     * Therefore, the invalidation process is split into two parts, `before_invalidating_path()`
+     * and `after_invalidating_path()`.
+     */
+    fn before_invalidating_path(
+        &self,
+        parent: &InodeData,
+        filename: &CStr,
+    ) -> Option<StrongInodeReference> {
+        // Note that we have to do this unconditionally, regardless of the value of
+        // `track_migration_info` -- same TOCTTOU problem as described in the comment above applies
+        // (preserialization might start before the operation is done)
+        self.try_lookup(parent, filename).ok().flatten()
+    }
+
+    /**
+     * Counterpart to `before_invalidating_path()`; must be called after the path-invalidating
+     * operation.
+     *
+     * If the inode’s migration info contains any path data, it is invalidated, and we
+     * try to refresh it from /proc/self/fd: It’s possible that the operation failed (and so the
+     * original path is still intact), or that the inode has another hard link left that the
+     * kernel knows about (unlikely, but worth a try).
+     *
+     * `inode` is the reference returned by `before_invalidating_path()`, `old_parent` and
+     * `old_filename` are used solely to generate a human-readable warning, as is `operation`,
+     * which is a capitalized simple past verb form describing the operation (e.g. "Overwrote").
+     */
+    fn after_invalidating_path(&self, inode: StrongInodeReference, operation: &str) {
+        let inode_data = inode.get();
+
+        let old_location = {
+            let mut migration_info_locked = inode_data.migration_info.lock().unwrap();
+            let Some(migration_info) = migration_info_locked.take() else {
+                // No migration info?  Nothing to do then.
+                return;
+            };
+            if !migration_info.has_path() {
+                // No path in the migration info?  Nothing to invalidate then.
+                *migration_info_locked = Some(migration_info);
+                return;
+            }
+            migration_info.location
+        };
+
+        match self.after_invalidating_path_refresh(inode_data) {
+            Ok(()) => {
+                if let Some(migration_info) = inode_data.migration_info.lock().unwrap().as_ref() {
+                    let new_location = &migration_info.location;
+                    info!("{operation} {old_location}, but found under {new_location}");
+                } else {
+                    warn!(
+                        "{operation} {old_location}, seem to have found new path, but lost it \
+                        again; may be unable to migrate inode"
+                    );
+                }
+            }
+            Err(err) => warn!(
+                "{operation} {old_location}, failed to get new path: {err}; will be unable to \
+                migrate inode"
+            ),
+        }
+    }
+
+    /**
+     * Try to find a new path to the given inode.
+     *
+     * Used internally by `after_invalidating_path()`.  Updates all migration info objects along
+     * the path.
+     */
+    fn after_invalidating_path_refresh(&self, inode_data: &InodeData) -> io::Result<()> {
+        let shared_dir_path = self
+            .inodes
+            .get(fuse::ROOT_ID)
+            .ok_or_else(|| other_io_error("Shared directory root node not found"))?
+            .get_path(&self.proc_self_fd)
+            .map_err(io::Error::from)
+            .err_context(|| "Failed to get shared directory root path")?;
+
+        preserialization::proc_paths::set_path_migration_info_from_proc_self_fd(
+            inode_data,
+            self,
+            &shared_dir_path,
+        )
+        .map_err(preserialization::proc_paths::WrappedError::into_inner)
     }
 }
 
@@ -1403,6 +1532,7 @@ impl FileSystem for PassthroughFs {
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 
+        let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
             let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
                 .supplementary_gid(
@@ -1418,6 +1548,9 @@ impl FileSystem for PassthroughFs {
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe { libc::mkdirat(parent_file.as_raw_fd(), name.as_ptr(), mode) }
         };
+        if let Some(invalidated_inode) = invalidated_inode {
+            self.after_invalidating_path(invalidated_inode, "Overwrote (via mkdir)");
+        }
         if res < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -1840,6 +1973,7 @@ impl FileSystem for PassthroughFs {
         let old_file = old_inode.get_file()?;
         let new_file = new_inode.get_file()?;
 
+        let invalidated_inode = self.before_invalidating_path(&new_inode, newname);
         // Safe because this doesn't modify any memory and we check the return value.
         // TODO: Switch to libc::renameat2 once https://github.com/rust-lang/libc/pull/1508 lands
         // and we have glibc 2.28.
@@ -1853,19 +1987,18 @@ impl FileSystem for PassthroughFs {
                 flags,
             )
         };
+        if let Some(invalidated_inode) = invalidated_inode {
+            self.after_invalidating_path(invalidated_inode, "Overwrote (via rename)");
+        }
         if res != 0 {
             return Err(io::Error::last_os_error());
         }
 
-        if self.track_migration_info.load(Ordering::Relaxed) {
-            // When preparing for migration, we need to tell the migration code that this node has
-            // been renamed, which might need to be reflected in the migration info
-            if let Err(err) = self.update_inode_migration_info(new_inode, newname) {
-                warn!(
-                    "Failed to update renamed file's ({oldname:?} -> {newname:?}) migration info, \
-                    the migration destination may be unable to find it: {err}",
-                );
-            }
+        if let Err(err) = self.update_inode_migration_info(new_inode, newname) {
+            warn!(
+                "Failed to update renamed file's ({oldname:?} -> {newname:?}) migration info, \
+                the migration destination may be unable to find it: {err}",
+            );
         }
 
         Ok(())
@@ -1884,6 +2017,7 @@ impl FileSystem for PassthroughFs {
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 
+        let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
             let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
                 .supplementary_gid(
@@ -1906,6 +2040,9 @@ impl FileSystem for PassthroughFs {
                 )
             }
         };
+        if let Some(invalidated_inode) = invalidated_inode {
+            self.after_invalidating_path(invalidated_inode, "Overwrote (via mknod)");
+        }
 
         if res < 0 {
             return Err(io::Error::last_os_error());
@@ -1939,6 +2076,7 @@ impl FileSystem for PassthroughFs {
         let procname = CString::new(format!("{}", inode_file.as_raw_fd()))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
+        let invalidated_inode = self.before_invalidating_path(&new_inode, newname);
         // Safe because this doesn't modify any memory and we check the return value.
         let res = unsafe {
             libc::linkat(
@@ -1949,6 +2087,9 @@ impl FileSystem for PassthroughFs {
                 libc::AT_SYMLINK_FOLLOW,
             )
         };
+        if let Some(invalidated_inode) = invalidated_inode {
+            self.after_invalidating_path(invalidated_inode, "Overwrote (via link)");
+        }
         if res == 0 {
             self.do_lookup(newparent, newname)
         } else {
@@ -1967,6 +2108,7 @@ impl FileSystem for PassthroughFs {
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 
+        let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
             let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
                 .supplementary_gid(
@@ -1978,6 +2120,9 @@ impl FileSystem for PassthroughFs {
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe { libc::symlinkat(linkname.as_ptr(), parent_file.as_raw_fd(), name.as_ptr()) }
         };
+        if let Some(invalidated_inode) = invalidated_inode {
+            self.after_invalidating_path(invalidated_inode, "Overwrote (via symlink)");
+        }
 
         if res < 0 {
             return Err(io::Error::last_os_error());

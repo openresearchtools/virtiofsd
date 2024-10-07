@@ -930,8 +930,10 @@ struct Opt {
     /// Defines how to perform migration, i.e. how to represent the internal state to the
     /// destination, and how to obtain that representation.
     ///
-    /// - find-paths: Iterate through the shared directory (exhaustive search) to find paths for
-    ///   all inodes indexed and opened by the guest, and transfer these paths to the destination.
+    /// - find-paths: Obtain paths for all inodes indexed and opened by the guest, and transfer
+    ///   those paths to the destination.  To get those paths, we try to read the symbolic links in
+    ///   /proc/self/fd first; if that does not work, we will fall back to iterating through the
+    ///   shared directory (exhaustive search), enumerating all paths within.
     ///
     /// This parameter is ignored on the destination side.
     #[arg(long = "migration-mode", default_value = "find-paths")]
