@@ -340,7 +340,7 @@ impl<'a> Walker<'a> {
 }
 
 /// Return an inode’s link count, if available.
-fn link_count(inode_data: &InodeData) -> Option<u64> {
+fn link_count(inode_data: &InodeData) -> Option<libc::nlink_t> {
     inode_data
         .get_file()
         .ok()
