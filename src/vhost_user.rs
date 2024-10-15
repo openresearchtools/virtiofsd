@@ -473,7 +473,8 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
             | VhostUserProtocolFeatures::REPLY_ACK
             | VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS
             | VhostUserProtocolFeatures::LOG_SHMFD
-            | VhostUserProtocolFeatures::DEVICE_STATE;
+            | VhostUserProtocolFeatures::DEVICE_STATE
+            | VhostUserProtocolFeatures::RESET_DEVICE;
 
         if self.tag.is_some() {
             protocol_features |= VhostUserProtocolFeatures::CONFIG;
@@ -542,6 +543,11 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
                 let _ = premigration_thread.handle.join();
             }
         }
+    }
+
+    fn reset_device(&self) {
+        // Clear our device state
+        self.thread.write().unwrap().server.destroy();
     }
 
     fn set_event_idx(&self, enabled: bool) {

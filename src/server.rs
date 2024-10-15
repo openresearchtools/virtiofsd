@@ -1299,7 +1299,8 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
-    fn destroy(&self) -> usize {
+    /// Public so the `VhostUserBackend` implementation can call this on device reset
+    pub fn destroy(&self) -> usize {
         // No reply to this function.
         self.fs.destroy();
         self.options
