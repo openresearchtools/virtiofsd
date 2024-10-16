@@ -326,7 +326,7 @@ Alternatively, you can simply map your own GID to a single GID in the namespace:
 For example, --gid-map=:0:1000:1: would map GID 1000 to root’s GID in the namespace (and thus the guest).
 
 ```shell
---migration-mode=<find-paths>
+--migration-mode=<find-paths|file-handles>
 ```
 Defines how to perform migration, i.e. how to represent the internal state to the destination
 instance, and how to obtain that representation.  Note that (when using QEMU) **QEMU version 8.2**
@@ -346,6 +346,20 @@ determined with this switch:
   the shared directory while migration is ongoing (e.g. renaming, unlinking, removing permissions),
   which can potentially lead to data loss and/or corruption.  In addition, the fall-back method of
   iterating through the shared directory is expensive in terms of I/O.
+
+- **file-handles**: Has the source instance generate a file handle for each inode, which is sent to
+  the destination and opened there.  A file handle is data that uniquely identifies an inode on a
+  filesystem.  Consequently, this migration mode requires source and destination to use the same
+  shared directory on the same filesystem; however, source and destination instance need not
+  necessarily be on the same host, if that filesystem is a network filesystem.
+  If the shared directory spans multiple filesystems, they must all be the same in source and
+  destination and have the same mount points inside of the shared directory.
+  Using file handles is comparatively cheap in terms of I/O, and it is resilient against inodes
+  being renamed or unlinked by any party while they are still in use by the guest, as long as the
+  virtiofsd source instance keeps running until migration is fully complete.  They do however
+  require the destination instance to have the *DAC_READ_SEARCH* capability, which basically means
+  having to run it as root, and to pass the `--modcaps=+dac_read_search` command line option to it
+  so it does not drop that capability at start-up.
 
 This parameter is ignored on the destination side of migration.
 

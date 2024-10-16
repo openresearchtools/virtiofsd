@@ -11,6 +11,7 @@ use crate::passthrough::file_handle::SerializableFileHandle;
 use crate::passthrough::inode_store::Inode as InodeId;
 use crate::passthrough::Handle as HandleId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Full serialized device state (for `PassthroughFs`).  This is an enum so in case incompatible
 /// changes have to be made, new version variants can be added while still being able to migrate
@@ -19,8 +20,12 @@ use serde::{Deserialize, Serialize};
 pub(super) enum PassthroughFs {
     /// Initial version
     V1(PassthroughFsV1),
+
+    /// Version with mount point paths (for migrating file handles)
+    V2(PassthroughFsV2),
 }
 
+/// v1 of our serialized migration stream.
 #[derive(Debug, Deserialize, Serialize)]
 pub(super) struct PassthroughFsV1 {
     /// List of all looked up inodes
@@ -35,6 +40,22 @@ pub(super) struct PassthroughFsV1 {
 
     /// Remember which options have been negotiated during INIT
     pub(super) negotiated_opts: NegotiatedOpts,
+}
+
+/// v2 of our serialized migration stream.
+#[derive(Debug, Deserialize, Serialize)]
+pub(super) struct PassthroughFsV2 {
+    /// Base class: All v1 fields
+    pub(super) v1: PassthroughFsV1,
+
+    /**
+     * Map of mount IDs to paths in the shared directory.
+     *
+     * When migrating using file handles, we need to translate the source’s mount IDs (only valid
+     * there) into paths inside the shared directory so the destination can generate mount FDs for
+     * file handles created by the source, to pass them to `open_by_handle_at()`.
+     */
+    pub(super) mount_paths: HashMap<u64, String>,
 }
 
 /// Options that can be negotiated during INIT, i.e. ones for which we must remember whether we
@@ -96,6 +117,13 @@ pub(super) enum InodeLocation {
         /// Filename relative to the shared directory root node.  Stored in UTF-8, just like
         /// `Path.filename`.
         filename: String,
+    },
+
+    /// Described by its file handle
+    FileHandle {
+        /// File handle, which includes the source system’s mount ID (only valid as a key for the
+        /// [`PassthroughFsV2.mount_paths`](PassthroughFsV2#structfield.mount_paths) map).
+        handle: SerializableFileHandle,
     },
 }
 

@@ -8,6 +8,7 @@ use crate::passthrough::stat::MountId;
 use serde::{Deserialize, Serialize};
 use std::convert::{TryFrom, TryInto};
 use std::ffi::CStr;
+use std::fmt::{self, Display};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -165,6 +166,47 @@ impl SerializableFileHandle {
             self.require_equal_without_mount_id(other)
         }
     }
+
+    /// Get the handle data (without its mount ID or type).
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.handle
+    }
+
+    /// Get the handle type.
+    pub fn handle_type(&self) -> i32 {
+        self.handle_type
+    }
+
+    /// Get the mount ID for which this handle is valid.
+    pub fn mount_id(&self) -> u64 {
+        self.mnt_id
+    }
+
+    /**
+     * Convert this handle into an openable handle.
+     *
+     * An openable handle must have a reference to a mount FD, i.e. a file descriptor on the mount
+     * identified by its mount ID.  That FD is `mount_fd`.
+     *
+     * (Note that `mount_fd.mount_id()` may differ from `self.mount_id()`.  When migrating, we will
+     * receive `SerializableFileHandle`s from the source with mount IDs valid only on the source,
+     * not here.  The caller is responsible for passing a fitting `mount_fd` for a mount ID valid
+     * here.)
+     */
+    pub fn to_openable(&self, mount_fd: Arc<MountFd>) -> io::Result<OpenableFileHandle> {
+        let c_handle: oslib::CFileHandle = self.try_into()?;
+        Ok(OpenableFileHandle {
+            handle: FileHandle {
+                // Use the mount FD’s mount ID instead of `self.mnt_id`: Serialized handles may
+                // contain mount IDs that aren’t valid on this host.  `MountFd` objects’ mount IDs
+                // are always valid on the current host, and because the caller guarantees that
+                // `mount_fd` can be used to open `self`, we can use its mount ID.
+                mnt_id: mount_fd.mount_id(),
+                handle: c_handle,
+            },
+            mount_fd,
+        })
+    }
 }
 
 impl From<&FileHandle> for SerializableFileHandle {
@@ -195,5 +237,19 @@ impl TryFrom<&FileOrHandle> for SerializableFileHandle {
             }
             FileOrHandle::Invalid(err) => Err(io::Error::new(err.kind(), Arc::clone(err))),
         }
+    }
+}
+
+impl Display for SerializableFileHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "mount_id={}, handle_type=0x{:x}, handle=",
+            self.mnt_id, self.handle_type
+        )?;
+        for byte in &self.handle {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }

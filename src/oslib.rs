@@ -236,6 +236,11 @@ pub fn do_open_relative_to(
 }
 
 mod filehandle {
+    use crate::passthrough::file_handle::SerializableFileHandle;
+    use crate::util::other_io_error;
+    use std::convert::{TryFrom, TryInto};
+    use std::io;
+
     const MAX_HANDLE_SZ: usize = 128;
 
     #[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
@@ -263,6 +268,38 @@ mod filehandle {
 
         pub fn handle_type(&self) -> libc::c_int {
             self.handle_type
+        }
+    }
+
+    impl TryFrom<&SerializableFileHandle> for CFileHandle {
+        type Error = io::Error;
+
+        fn try_from(sfh: &SerializableFileHandle) -> io::Result<Self> {
+            let sfh_bytes = sfh.as_bytes();
+            if sfh_bytes.len() > MAX_HANDLE_SZ {
+                return Err(other_io_error("File handle too long"));
+            }
+            let mut f_handle = [0u8; MAX_HANDLE_SZ];
+            f_handle[..sfh_bytes.len()].copy_from_slice(sfh_bytes);
+
+            Ok(CFileHandle {
+                handle_bytes: sfh_bytes.len().try_into().map_err(|err| {
+                    other_io_error(format!(
+                        "Handle size ({} bytes) too big: {}",
+                        sfh_bytes.len(),
+                        err
+                    ))
+                })?,
+                #[allow(clippy::useless_conversion)]
+                handle_type: sfh.handle_type().try_into().map_err(|err| {
+                    other_io_error(format!(
+                        "Handle type (0x{:x}) too large: {}",
+                        sfh.handle_type(),
+                        err
+                    ))
+                })?,
+                f_handle,
+            })
         }
     }
 
