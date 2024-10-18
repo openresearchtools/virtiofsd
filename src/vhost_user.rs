@@ -123,19 +123,6 @@ struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
     pool: Option<ThreadPool>,
 }
 
-impl<F: FileSystem + Send + Sync + 'static> Clone for VhostUserFsThread<F> {
-    fn clone(&self) -> Self {
-        VhostUserFsThread {
-            mem: self.mem.clone(),
-            kill_evt: self.kill_evt.try_clone().unwrap(),
-            server: self.server.clone(),
-            vu_req: self.vu_req.clone(),
-            event_idx: self.event_idx,
-            pool: self.pool.clone(),
-        }
-    }
-}
-
 impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsThread<F> {
     fn new(fs: F, thread_pool_size: usize) -> Result<Self> {
         let pool = if thread_pool_size > 0 {
