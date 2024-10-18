@@ -1268,6 +1268,23 @@ fn main() {
         warn!("Use of deprecated value 'fallback' for '--inode-file-handles': Please use 'prefer' instead");
     }
 
+    // Check migration argument compatibility
+    match opt.migration_mode {
+        MigrationMode::FindPaths => (), // all allowed
+
+        MigrationMode::FileHandles => {
+            if opt.migration_confirm_paths || opt.migration_verify_handles {
+                if opt.migration_confirm_paths {
+                    error!("Cannot use --migration-confirm-paths with --migration-mode=file-handles (because it is unnecessary)");
+                }
+                if opt.migration_verify_handles {
+                    error!("Cannot use --migration-verify-handles with --migration-mode=file-handles (because it is unnecessary)");
+                }
+                process::exit(1);
+            }
+        }
+    }
+
     let xattrmap = opt.xattrmap.clone();
     let xattr = xattrmap.is_some() || opt.posix_acl || opt.xattr;
     let thread_pool_size = opt.thread_pool_size;
