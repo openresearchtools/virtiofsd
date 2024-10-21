@@ -961,8 +961,9 @@ struct Opt {
     #[arg(long = "migration-on-error", default_value = "abort")]
     migration_on_error: MigrationOnError,
 
-    /// Ensure that the migration destination opens the very same inodes as the source (only works
-    /// if source and destination use the same shared directory on the same filesystem).
+    /// Only for find-paths migration mode: Ensure that the migration destination opens the very
+    /// same inodes as the source (only works if source and destination use the same shared
+    /// directory on the same filesystem).
     ///
     /// This option makes the source attach the respective file handle to each inode transferred
     /// during migration.  Once the destination has (re-)opened the inode, it will generate the
@@ -981,9 +982,9 @@ struct Opt {
     #[arg(long = "migration-verify-handles")]
     migration_verify_handles: bool,
 
-    /// Double-check the identity of inodes right before switching over to the destination,
-    /// potentially making migration more resilient when third parties have write access to the
-    /// shared directory.
+    /// Only for find-paths migration mode: Double-check the identity of inodes right before
+    /// switching over to the destination, potentially making migration more resilient when third
+    /// parties have write access to the shared directory.
     ///
     /// When representing migrated inodes using their paths relative to the shared directory,
     /// double-check during switch-over to the destination that each path still matches the
