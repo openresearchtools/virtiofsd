@@ -15,7 +15,7 @@ use crate::filesystem::{
     Context, Entry, Extensions, FileSystem, FsOptions, GetxattrReply, ListxattrReply, OpenOptions,
     SecContext, SetattrValid, SetxattrFlags, ZeroCopyReader, ZeroCopyWriter,
 };
-use crate::passthrough::credentials::{drop_effective_cap, UnixCredentials};
+use crate::passthrough::credentials::{drop_effective_cap, UnixCredentials, UnixCredentialsGuard};
 use crate::passthrough::device_state::preserialization::{
     self, HandleMigrationInfo, InodeMigrationInfo,
 };
@@ -1095,12 +1095,7 @@ impl PassthroughFs {
         extensions: Extensions,
     ) -> io::Result<RawFd> {
         let fd = {
-            let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
-                .supplementary_gid(
-                    self.sup_group_extension.load(Ordering::Relaxed),
-                    extensions.sup_gid,
-                )
-                .set()?;
+            let _credentials_guard = self.unix_credentials_guard(ctx, &extensions)?;
             let _umask_guard = self
                 .posix_acl
                 .load(Ordering::Relaxed)
@@ -1395,6 +1390,27 @@ impl PassthroughFs {
         )
         .map_err(preserialization::proc_paths::WrappedError::into_inner)
     }
+
+    /**
+     * Temporarily changes the effective UID and GID.
+     *
+     * Changes the effective UID and GID to the one required by `ctx`, potentially including a
+     * supplementary GID given in `extensions`.  Return to the previous state once the returned
+     * guard is dropped.
+     */
+    fn unix_credentials_guard(
+        &self,
+        ctx: &Context,
+        extensions: &Extensions,
+    ) -> io::Result<Option<UnixCredentialsGuard>> {
+        let host_uid = ctx.uid;
+        let host_gid = ctx.gid;
+        let supp_gid = extensions.sup_gid;
+
+        UnixCredentials::new(host_uid, host_gid)
+            .supplementary_gid(self.sup_group_extension.load(Ordering::Relaxed), supp_gid)
+            .set()
+    }
 }
 
 impl FileSystem for PassthroughFs {
@@ -1539,12 +1555,7 @@ impl FileSystem for PassthroughFs {
 
         let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
-            let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
-                .supplementary_gid(
-                    self.sup_group_extension.load(Ordering::Relaxed),
-                    extensions.sup_gid,
-                )
-                .set()?;
+            let _credentials_guard = self.unix_credentials_guard(&ctx, &extensions)?;
             let _umask_guard = self
                 .posix_acl
                 .load(Ordering::Relaxed)
@@ -1989,12 +2000,7 @@ impl FileSystem for PassthroughFs {
 
         let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
-            let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
-                .supplementary_gid(
-                    self.sup_group_extension.load(Ordering::Relaxed),
-                    extensions.sup_gid,
-                )
-                .set()?;
+            let _credentials_guard = self.unix_credentials_guard(&ctx, &extensions)?;
             let _umask_guard = self
                 .posix_acl
                 .load(Ordering::Relaxed)
@@ -2080,12 +2086,7 @@ impl FileSystem for PassthroughFs {
 
         let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
-            let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
-                .supplementary_gid(
-                    self.sup_group_extension.load(Ordering::Relaxed),
-                    extensions.sup_gid,
-                )
-                .set()?;
+            let _credentials_guard = self.unix_credentials_guard(&ctx, &extensions)?;
 
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe { libc::symlinkat(linkname.as_ptr(), parent_file.as_raw_fd(), name.as_ptr()) }
