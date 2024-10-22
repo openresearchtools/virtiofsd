@@ -24,7 +24,7 @@ use crate::passthrough::inode_store::{
 };
 use crate::passthrough::util::{ebadf, is_safe_inode, openat, reopen_fd_through_proc};
 use crate::read_dir::ReadDir;
-use crate::soft_idmap::{GuestId, HostGid, HostId, HostUid, Id};
+use crate::soft_idmap::{GuestGid, GuestId, GuestUid, HostGid, HostId, HostUid, Id};
 use crate::util::{other_io_error, ResultErrorContext};
 use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
@@ -1405,13 +1405,36 @@ impl PassthroughFs {
         ctx: &Context,
         extensions: &Extensions,
     ) -> io::Result<Option<UnixCredentialsGuard>> {
-        let host_uid = ctx.uid.id_mapped();
-        let host_gid = ctx.gid.id_mapped();
-        let supp_gid = extensions.sup_gid.map(|gid| gid.id_mapped());
+        let host_uid = self.map_guest_uid(ctx.uid)?;
+        let host_gid = self.map_guest_gid(ctx.gid)?;
+        let supp_gid = extensions
+            .sup_gid
+            .map(|gid| self.map_guest_gid(gid))
+            .transpose()?;
 
         UnixCredentials::new(host_uid, host_gid)
             .supplementary_gid(self.sup_group_extension.load(Ordering::Relaxed), supp_gid)
             .set()
+    }
+
+    /// Translate `guest_uid` to a host UID
+    fn map_guest_uid(&self, guest_uid: GuestUid) -> io::Result<HostUid> {
+        Ok(guest_uid.id_mapped())
+    }
+
+    /// Translate `guest_gid` to a host GID
+    fn map_guest_gid(&self, guest_gid: GuestGid) -> io::Result<HostGid> {
+        Ok(guest_gid.id_mapped())
+    }
+
+    /// Translate `host_uid` to a guest UID
+    fn map_host_uid(&self, host_uid: HostUid) -> io::Result<GuestUid> {
+        Ok(host_uid.id_mapped())
+    }
+
+    /// Translate `host_gid` to a guest GID
+    fn map_host_gid(&self, host_gid: HostGid) -> io::Result<GuestGid> {
+        Ok(host_gid.id_mapped())
     }
 }
 
@@ -1842,13 +1865,13 @@ impl FileSystem for PassthroughFs {
 
         if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
             let uid = if valid.contains(SetattrValid::UID) {
-                attr.uid.id_mapped().into_inner()
+                self.map_guest_uid(attr.uid)?.into_inner()
             } else {
                 // Cannot use -1 here because these are unsigned values.
                 u32::MAX
             };
             let gid = if valid.contains(SetattrValid::GID) {
-                attr.gid.id_mapped().into_inner()
+                self.map_guest_gid(attr.gid)?.into_inner()
             } else {
                 // Cannot use -1 here because these are unsigned values.
                 u32::MAX
@@ -2215,8 +2238,8 @@ impl FileSystem for PassthroughFs {
         // ("fs/fuse: warn if fuse_access is called when idmapped mounts are allowed").
         // In case when idmapped mounts are not enabled we are good to rely on ctx.uid/ctx.gid values.
 
-        let st_uid = HostUid::from(st.st_uid).id_mapped();
-        let st_gid = HostGid::from(st.st_gid).id_mapped();
+        let st_uid = self.map_host_uid(HostUid::from(st.st_uid))?;
+        let st_gid = self.map_host_gid(HostGid::from(st.st_gid))?;
 
         if (mode & libc::R_OK) != 0
             && !ctx.uid.is_root()
