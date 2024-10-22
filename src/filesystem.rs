@@ -32,10 +32,7 @@ pub struct Entry {
     /// Inode attributes. Even if `attr_timeout` is zero, `attr` must be correct. For example, for
     /// `open()`, FUSE uses `attr.st_size` from `lookup()` to determine how many bytes to request.
     /// If this value is not correct, incorrect data will be returned.
-    pub attr: libc::stat64,
-
-    /// Flags for `fuse::Attr.flags`.
-    pub attr_flags: u32,
+    pub attr: fuse::Attr,
 
     /// How long the values in `attr` should be considered valid. If the attributes of the `Entry`
     /// are only modified by the FUSE client, then this should be set to a very large value.
@@ -56,7 +53,7 @@ impl From<Entry> for fuse::EntryOut {
             attr_valid: entry.attr_timeout.as_secs(),
             entry_valid_nsec: entry.entry_timeout.subsec_nanos(),
             attr_valid_nsec: entry.attr_timeout.subsec_nanos(),
-            attr: fuse::Attr::with_flags(entry.attr, entry.attr_flags),
+            attr: entry.attr,
         }
     }
 }
@@ -471,7 +468,7 @@ pub trait FileSystem {
         ctx: Context,
         inode: Self::Inode,
         handle: Option<Self::Handle>,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(fuse::Attr, Duration)> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
@@ -496,10 +493,10 @@ pub trait FileSystem {
         &self,
         ctx: Context,
         inode: Self::Inode,
-        attr: libc::stat64,
+        attr: fuse::SetattrIn,
         handle: Option<Self::Handle>,
         valid: SetattrValid,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(fuse::Attr, Duration)> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 

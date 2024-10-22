@@ -851,14 +851,14 @@ impl PassthroughFs {
             self.inodes.get_or_insert(inode_data)?
         };
 
+        let attr = fuse::Attr::with_flags(st.st, attr_flags);
         Ok(Entry {
             // By leaking, we transfer ownership of this refcount to the guest.  That is safe,
             // because the guest is expected to explicitly release its reference and decrement the
             // refcount via `FORGET` later.
             inode: unsafe { inode.leak() },
             generation: 0,
-            attr: st.st,
-            attr_flags,
+            attr,
             attr_timeout: self.cfg.attr_timeout,
             entry_timeout: self.cfg.entry_timeout,
         })
@@ -944,12 +944,13 @@ impl PassthroughFs {
         Err(ebadf())
     }
 
-    fn do_getattr(&self, inode: Inode) -> io::Result<(libc::stat64, Duration)> {
+    fn do_getattr(&self, inode: Inode) -> io::Result<(fuse::Attr, Duration)> {
         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
         let inode_file = data.get_file()?;
         let st = statx(&inode_file, None)?.st;
+        let attr = st.into();
 
-        Ok((st, self.cfg.attr_timeout))
+        Ok((attr, self.cfg.attr_timeout))
     }
 
     fn do_unlink(&self, parent: Inode, name: &CStr, flags: libc::c_int) -> io::Result<()> {
@@ -1782,7 +1783,7 @@ impl FileSystem for PassthroughFs {
         _ctx: Context,
         inode: Inode,
         _handle: Option<Handle>,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(fuse::Attr, Duration)> {
         self.do_getattr(inode)
     }
 
@@ -1790,10 +1791,11 @@ impl FileSystem for PassthroughFs {
         &self,
         _ctx: Context,
         inode: Inode,
-        attr: libc::stat64,
+        attr: fuse::SetattrIn,
         handle: Option<Handle>,
         valid: SetattrValid,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(fuse::Attr, Duration)> {
+        let attr = libc::stat64::from(attr);
         let inode_data = self.inodes.get(inode).ok_or_else(ebadf)?;
 
         // In this case, we need to open a new O_RDWR FD
