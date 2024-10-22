@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::convert::TryFrom;
-use std::mem;
 
 use crate::macros::enum_value;
 use bitflags::bitflags;
@@ -857,24 +856,6 @@ pub struct SetattrIn {
     pub unused5: u32,
 }
 unsafe impl ByteValued for SetattrIn {}
-
-impl From<SetattrIn> for libc::stat64 {
-    fn from(sai: SetattrIn) -> libc::stat64 {
-        let mut out: libc::stat64 = unsafe { mem::zeroed() };
-        out.st_mode = sai.mode;
-        out.st_uid = sai.uid;
-        out.st_gid = sai.gid;
-        out.st_size = sai.size as i64;
-        out.st_atime = sai.atime as i64;
-        out.st_mtime = sai.mtime as i64;
-        out.st_ctime = sai.ctime as i64;
-        out.st_atime_nsec = sai.atimensec.into();
-        out.st_mtime_nsec = sai.mtimensec.into();
-        out.st_ctime_nsec = sai.ctimensec.into();
-
-        out
-    }
-}
 
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
