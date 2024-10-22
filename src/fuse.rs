@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 use std::convert::TryFrom;
+use std::io;
 
 use crate::macros::enum_value;
-use crate::soft_idmap::{GuestGid, GuestUid, HostGid, HostId, HostUid};
+use crate::soft_idmap::{GuestGid, GuestUid, HostGid, HostUid};
 use bitflags::bitflags;
 use vm_memory::ByteValued;
 
@@ -602,15 +603,41 @@ pub struct Attr {
 }
 unsafe impl ByteValued for Attr {}
 
-impl From<libc::stat64> for Attr {
-    fn from(st: libc::stat64) -> Attr {
-        Attr::with_flags(st, 0)
-    }
-}
-
 impl Attr {
-    pub fn with_flags(st: libc::stat64, flags: u32) -> Attr {
-        Attr {
+    /**
+     * Turn a `stat64` result into its FUSE representation (`Attr`).
+     *
+     * Maps UID and GID from host to guest according to the mappings provided.
+     */
+    pub fn try_from_stat64<
+        UidMap: FnOnce(HostUid) -> io::Result<GuestUid>,
+        GidMap: FnOnce(HostGid) -> io::Result<GuestGid>,
+    >(
+        st: libc::stat64,
+        uid_map: UidMap,
+        gid_map: GidMap,
+    ) -> io::Result<Attr> {
+        Attr::try_with_flags(st, 0, uid_map, gid_map)
+    }
+
+    /**
+     * Turn a `stat64` result into its FUSE representation (`Attr`), including `flags`.
+     *
+     * Maps UID and GID from host to guest according to the mappings provided.
+     */
+    pub fn try_with_flags<
+        UidMap: FnOnce(HostUid) -> io::Result<GuestUid>,
+        GidMap: FnOnce(HostGid) -> io::Result<GuestGid>,
+    >(
+        st: libc::stat64,
+        flags: u32,
+        uid_map: UidMap,
+        gid_map: GidMap,
+    ) -> io::Result<Attr> {
+        let uid = uid_map(HostUid::from(st.st_uid))?;
+        let gid = gid_map(HostGid::from(st.st_gid))?;
+
+        Ok(Attr {
             ino: st.st_ino,
             size: st.st_size as u64,
             blocks: st.st_blocks as u64,
@@ -622,12 +649,12 @@ impl Attr {
             ctimensec: st.st_ctime_nsec as u32,
             mode: st.st_mode,
             nlink: st.st_nlink as u32,
-            uid: HostUid::from(st.st_uid).id_mapped(),
-            gid: HostGid::from(st.st_gid).id_mapped(),
+            uid,
+            gid,
             rdev: st.st_rdev as u32,
             blksize: st.st_blksize as u32,
             flags,
-        }
+        })
     }
 }
 

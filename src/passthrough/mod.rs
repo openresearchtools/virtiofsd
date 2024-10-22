@@ -852,7 +852,12 @@ impl PassthroughFs {
             self.inodes.get_or_insert(inode_data)?
         };
 
-        let attr = fuse::Attr::with_flags(st.st, attr_flags);
+        let attr = fuse::Attr::try_with_flags(
+            st.st,
+            attr_flags,
+            |uid| self.map_host_uid(uid),
+            |gid| self.map_host_gid(gid),
+        )?;
         Ok(Entry {
             // By leaking, we transfer ownership of this refcount to the guest.  That is safe,
             // because the guest is expected to explicitly release its reference and decrement the
@@ -949,7 +954,11 @@ impl PassthroughFs {
         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
         let inode_file = data.get_file()?;
         let st = statx(&inode_file, None)?.st;
-        let attr = st.into();
+        let attr = fuse::Attr::try_from_stat64(
+            st,
+            |uid| self.map_host_uid(uid),
+            |gid| self.map_host_gid(gid),
+        )?;
 
         Ok((attr, self.cfg.attr_timeout))
     }
