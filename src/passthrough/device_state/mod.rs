@@ -81,7 +81,7 @@ impl SerializableFileSystem for PassthroughFs {
             }
         }
 
-        let state = serialized::PassthroughFs::V2(self.try_into()?);
+        let state = serialized::PassthroughFs::V2(self.into());
         self.inodes.clear_migration_info();
         let serialized: Vec<u8> = state.try_into()?;
         state_pipe.write_all(&serialized)?;
