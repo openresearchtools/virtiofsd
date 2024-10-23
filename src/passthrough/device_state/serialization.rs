@@ -46,12 +46,10 @@ impl TryFrom<serialized::PassthroughFs> for Vec<u8> {
     }
 }
 
-impl TryFrom<&PassthroughFs> for serialized::PassthroughFsV2 {
-    type Error = io::Error;
-
+impl From<&PassthroughFs> for serialized::PassthroughFsV2 {
     /// Serialize `fs`, assuming it has been prepared for serialization (i.e. all inodes must have
     /// their migration info set)
-    fn try_from(fs: &PassthroughFs) -> io::Result<Self> {
+    fn from(fs: &PassthroughFs) -> Self {
         let handles_map = fs.handles.read().unwrap();
 
         let inodes: Vec<serialized::Inode> = fs.inodes.iter().map(|inode| {
@@ -92,7 +90,7 @@ impl TryFrom<&PassthroughFs> for serialized::PassthroughFsV2 {
             .map(|(handle, data)| (*handle, data.as_ref()).into())
             .collect();
 
-        Ok(serialized::PassthroughFsV2 {
+        serialized::PassthroughFsV2 {
             v1: serialized::PassthroughFsV1 {
                 inodes,
                 next_inode: fs.next_inode.load(Ordering::Relaxed),
@@ -104,7 +102,7 @@ impl TryFrom<&PassthroughFs> for serialized::PassthroughFsV2 {
             },
 
             mount_paths,
-        })
+        }
     }
 }
 
