@@ -17,6 +17,7 @@ pub mod oslib;
 pub mod passthrough;
 pub mod read_dir;
 pub mod sandbox;
+#[cfg(feature = "seccomp")]
 pub mod seccomp;
 pub mod server;
 pub mod util;
