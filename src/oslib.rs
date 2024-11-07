@@ -361,8 +361,8 @@ pub fn open_by_handle_at(
 }
 
 mod writev {
-    /// musl does not provide a wrapper for the `pwritev2(2)` system call,
-    /// we need to call it using `syscall(2)`.
+    //! musl does not provide a wrapper for the `pwritev2(2)` system call,
+    //! we need to call it using `syscall(2)`.
 
     #[cfg(target_env = "gnu")]
     pub use libc::pwritev2;
