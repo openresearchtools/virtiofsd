@@ -32,6 +32,7 @@ use crate::soft_idmap::{self, GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
 use crate::util::{other_io_error, ResultErrorContext};
 use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
+use guest_fd_limit::GuestFdSemaphore;
 use mount_fd::{MPRError, MountFds};
 use stat::{statx, StatExt};
 use std::borrow::Cow;
@@ -387,6 +388,12 @@ pub struct Config {
      * Is `take()`n when `PassthroughFs` is created, i.e. `None` during runtime.
      */
     pub gid_map: Option<Vec<soft_idmap::cmdline::IdMap>>,
+
+    /// Number of file descriptors we can allocate for guest use.  Limiting this ensures there is
+    /// always some room for file descriptors used and needed by virtiofsd internally.
+    ///
+    /// The default is `u64::MAX`.
+    pub guest_fd_limit: u64,
 }
 
 impl Default for Config {
@@ -418,6 +425,7 @@ impl Default for Config {
             migration_mode: MigrationMode::FindPaths,
             uid_map: None,
             gid_map: None,
+            guest_fd_limit: u64::MAX,
         }
     }
 }
@@ -439,6 +447,12 @@ pub struct PassthroughFs {
     // used for reading and writing data.
     handles: RwLock<BTreeMap<Handle, Arc<HandleData>>>,
     next_handle: AtomicU64,
+
+    // Represents a limit for the number of file descriptors we allow allocating for the guest.
+    // Having such a limit that is below the actual maximum number of file descriptors virtiofsd is
+    // allowed to use ensures that virtiofsd can always create file descriptors for internal use.
+    #[allow(dead_code)] // TODO: Track guest FDs
+    guest_fds: Arc<GuestFdSemaphore>,
 
     // Maps mount IDs to an open FD on the respective ID for the purpose of open_by_handle_at().
     // This is set when inode_file_handles is not never, since in the 'never' case,
@@ -536,6 +550,7 @@ impl PassthroughFs {
             next_inode: AtomicU64::new(fuse::ROOT_ID + 1),
             handles: RwLock::new(BTreeMap::new()),
             next_handle: AtomicU64::new(0),
+            guest_fds: Arc::new(GuestFdSemaphore::new(cfg.guest_fd_limit)),
             mount_fds,
             proc_self_fd,
             root_fd,
