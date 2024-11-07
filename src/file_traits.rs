@@ -47,9 +47,7 @@ pub trait FileReadWriteAtVolatile<B: BitmapSlice> {
     ) -> Result<usize>;
 }
 
-impl<'a, B: BitmapSlice, T: FileReadWriteAtVolatile<B> + ?Sized> FileReadWriteAtVolatile<B>
-    for &'a T
-{
+impl<B: BitmapSlice, T: FileReadWriteAtVolatile<B> + ?Sized> FileReadWriteAtVolatile<B> for &T {
     fn read_vectored_at_volatile(&self, bufs: &[&VolatileSlice<B>], offset: u64) -> Result<usize> {
         (**self).read_vectored_at_volatile(bufs, offset)
     }
