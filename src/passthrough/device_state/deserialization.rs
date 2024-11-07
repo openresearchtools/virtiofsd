@@ -372,7 +372,7 @@ impl serialized::Inode {
         let file_or_handle = if let Some(h) = handle.as_ref() {
             FileOrHandle::Handle(fs.make_file_handle_openable(h)?)
         } else {
-            FileOrHandle::File(fd)
+            FileOrHandle::File(fs.guest_fds.allocate(fd)?)
         };
 
         Ok(InodeData {
@@ -455,7 +455,7 @@ impl serialized::Inode {
         let st = statx(&fd, None).err_context(|| "stat")?;
 
         let file_or_handle = match fs.cfg.inode_file_handles {
-            InodeFileHandlesMode::Never => FileOrHandle::File(fd),
+            InodeFileHandlesMode::Never => FileOrHandle::File(fs.guest_fds.allocate(fd)?),
             InodeFileHandlesMode::Mandatory | InodeFileHandlesMode::Prefer => {
                 FileOrHandle::Handle(ofh)
             }

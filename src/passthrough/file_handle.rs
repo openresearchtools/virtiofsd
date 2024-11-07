@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::oslib;
+use crate::passthrough::guest_fd_limit::GuestFile;
 use crate::passthrough::mount_fd::{MPRResult, MountFd, MountFds};
 use crate::passthrough::stat::MountId;
 use serde::{Deserialize, Serialize};
@@ -35,7 +36,7 @@ pub struct SerializableFileHandle {
 }
 
 pub enum FileOrHandle {
-    File(File),
+    File(GuestFile),
     Handle(OpenableFileHandle),
     // `io::Error` does not implement `Clone`, so without wrapping it in `Arc`, returning the error
     // anywhere would be impossible without consuming it

@@ -9,8 +9,6 @@
 //! internal use.  By limiting the number we will allocate for the guest, we can ensure there are
 //! always free slots open for such internal use.
 
-#![allow(dead_code)] // TODO: Use this code
-
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};

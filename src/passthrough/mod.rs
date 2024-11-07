@@ -451,7 +451,6 @@ pub struct PassthroughFs {
     // Represents a limit for the number of file descriptors we allow allocating for the guest.
     // Having such a limit that is below the actual maximum number of file descriptors virtiofsd is
     // allowed to use ensures that virtiofsd can always create file descriptors for internal use.
-    #[allow(dead_code)] // TODO: Track guest FDs
     guest_fds: Arc<GuestFdSemaphore>,
 
     // Maps mount IDs to an open FD on the respective ID for the purpose of open_by_handle_at().
@@ -878,7 +877,7 @@ impl PassthroughFs {
             let file_or_handle = if let Some(h) = handle.as_ref() {
                 FileOrHandle::Handle(self.make_file_handle_openable(h)?)
             } else {
-                FileOrHandle::File(path_fd)
+                FileOrHandle::File(self.guest_fds.allocate(path_fd)?)
             };
 
             let mig_info = if self.track_migration_info.load(Ordering::Relaxed) {
@@ -1279,7 +1278,7 @@ impl PassthroughFs {
         let file_or_handle = if let Some(h) = handle.as_ref() {
             FileOrHandle::Handle(self.make_file_handle_openable(h)?)
         } else {
-            FileOrHandle::File(path_fd)
+            FileOrHandle::File(self.guest_fds.allocate(path_fd)?)
         };
 
         // Always keep the root node's migration info set (`InodeStore::clear_migration_info()`

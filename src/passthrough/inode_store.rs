@@ -132,7 +132,7 @@ impl<'a> InodeData {
     /// Get an `O_PATH` file for this inode
     pub fn get_file(&'a self) -> io::Result<InodeFile<'a>> {
         match &self.file_or_handle {
-            FileOrHandle::File(f) => Ok(InodeFile::Ref(f)),
+            FileOrHandle::File(f) => Ok(InodeFile::Ref(f.get_file())),
             FileOrHandle::Handle(h) => {
                 let file = h.open(libc::O_PATH)?;
                 Ok(InodeFile::Owned(file))
