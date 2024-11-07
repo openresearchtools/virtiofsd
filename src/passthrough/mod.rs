@@ -5,6 +5,7 @@
 pub mod credentials;
 pub mod device_state;
 pub mod file_handle;
+mod guest_fd_limit;
 pub mod inode_store;
 pub mod mount_fd;
 pub mod read_only;
