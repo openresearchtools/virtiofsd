@@ -46,18 +46,19 @@ fn setup_rlimit_nofile_to(nofile: rlim_t) -> Result<(), String> {
     }
 }
 
-pub fn setup_rlimit_nofile(nofile: Option<u64>) -> Result<(), String> {
+/// Set the limit of open files to the given value, returning the actual limit.
+pub fn setup_rlimit_nofile(nofile: Option<u64>) -> Result<u64, String> {
     let max_nofile = get_max_nofile()?;
     let rlimit { rlim_cur, rlim_max } = get_nofile_limits()?;
 
     let target_limit = if let Some(nofile) = nofile {
         if nofile == 0 {
-            return Ok(()); // '--rlimit-nofile=0' leaves the resource limit unchanged
+            return Ok(rlim_cur); // '--rlimit-nofile=0' leaves the resource limit unchanged
         }
         nofile
     } else {
         if DEFAULT_NOFILE <= rlim_cur {
-            return Ok(()); // the user has already setup the soft limit higher than the target
+            return Ok(rlim_cur); // the user has already setup the soft limit higher than the target
         }
         cmp::min(DEFAULT_NOFILE, max_nofile)
     };
@@ -66,7 +67,7 @@ pub fn setup_rlimit_nofile(nofile: Option<u64>) -> Result<(), String> {
         return Err(format!("It cannot be increased above {max_nofile}"));
     }
 
-    if let Err(error) = setup_rlimit_nofile_to(target_limit) {
+    let new_limit = if let Err(error) = setup_rlimit_nofile_to(target_limit) {
         if nofile.is_some() {
             // Error attempting to setup user-supplied value
             return Err(error);
@@ -77,9 +78,12 @@ pub fn setup_rlimit_nofile(nofile: Option<u64>) -> Result<(), String> {
             );
             setup_rlimit_nofile_to(rlim_max).map_err(|error| {
                 format!("Cannot increase the soft limit to the hard limit: {error}")
-            })?
+            })?;
+            rlim_max
         }
-    }
+    } else {
+        target_limit
+    };
 
-    Ok(())
+    Ok(new_limit)
 }
