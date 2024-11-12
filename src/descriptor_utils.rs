@@ -252,7 +252,7 @@ impl<'a, B: Bitmap + BitmapSlice + 'static> Reader<'a, B> {
     /// Returns the number of bytes read from the descriptor chain buffer.
     /// The number of bytes read can be less than `count` if there isn't
     /// enough data in the descriptor chain buffer.
-    pub fn read_to_at<F: FileReadWriteAtVolatile<B>>(
+    pub fn write_to_file_at<F: FileReadWriteAtVolatile<B>>(
         &mut self,
         dst: F,
         count: usize,
@@ -377,7 +377,7 @@ impl<'a, B: Bitmap + BitmapSlice + 'static> Writer<'a, B> {
     /// Returns the number of bytes written to the descriptor chain buffer.
     /// The number of bytes written can be less than `count` if
     /// there isn't enough data in the descriptor chain buffer.
-    pub fn write_from_at<F: FileReadWriteAtVolatile<B>>(
+    pub fn read_from_file_at<F: FileReadWriteAtVolatile<B>>(
         &mut self,
         src: F,
         count: usize,

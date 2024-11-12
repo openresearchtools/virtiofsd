@@ -125,7 +125,7 @@ pub trait ZeroCopyReader {
     /// If any error is returned then the implementation must guarantee that no bytes were copied
     /// from `self`. If the underlying write to `f` returns `0` then the implementation must return
     /// an error of the kind `io::ErrorKind::WriteZero`.
-    fn read_to(
+    fn write_to_file_at(
         &mut self,
         f: &File,
         count: usize,
@@ -135,14 +135,14 @@ pub trait ZeroCopyReader {
 }
 
 impl<R: ZeroCopyReader> ZeroCopyReader for &mut R {
-    fn read_to(
+    fn write_to_file_at(
         &mut self,
         f: &File,
         count: usize,
         off: u64,
         flags: Option<oslib::WritevFlags>,
     ) -> io::Result<usize> {
-        (**self).read_to(f, count, off, flags)
+        (**self).write_to_file_at(f, count, off, flags)
     }
 }
 
@@ -162,12 +162,12 @@ pub trait ZeroCopyWriter {
     /// If any error is returned then the implementation must guarantee that no bytes were copied
     /// from `f`. If the underlying read from `f` returns `0` then the implementation must return an
     /// error of the kind `io::ErrorKind::UnexpectedEof`.
-    fn write_from(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize>;
+    fn read_from_file_at(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize>;
 }
 
 impl<W: ZeroCopyWriter> ZeroCopyWriter for &mut W {
-    fn write_from(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
-        (**self).write_from(f, count, off)
+    fn read_from_file_at(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
+        (**self).read_from_file_at(f, count, off)
     }
 }
 

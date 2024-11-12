@@ -30,22 +30,22 @@ const PARENT_DIR_CSTR: &[u8] = b"..";
 struct ZcReader<'a>(Reader<'a>);
 
 impl ZeroCopyReader for ZcReader<'_> {
-    fn read_to(
+    fn write_to_file_at(
         &mut self,
         f: &File,
         count: usize,
         off: u64,
         flags: Option<oslib::WritevFlags>,
     ) -> io::Result<usize> {
-        self.0.read_to_at(f, count, off, flags)
+        self.0.write_to_file_at(f, count, off, flags)
     }
 }
 
 struct ZcWriter<'a>(Writer<'a>);
 
 impl ZeroCopyWriter for ZcWriter<'_> {
-    fn write_from(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
-        self.0.write_from_at(f, count, off)
+    fn read_from_file_at(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
+        self.0.read_from_file_at(f, count, off)
     }
 }
 
