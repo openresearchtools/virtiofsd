@@ -41,27 +41,11 @@ impl ZeroCopyReader for ZcReader<'_> {
     }
 }
 
-impl io::Read for ZcReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
 struct ZcWriter<'a>(Writer<'a>);
 
 impl ZeroCopyWriter for ZcWriter<'_> {
     fn write_from(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
         self.0.write_from_at(f, count, off)
-    }
-}
-
-impl io::Write for ZcWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
     }
 }
 

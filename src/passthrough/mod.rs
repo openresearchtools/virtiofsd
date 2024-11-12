@@ -1704,7 +1704,7 @@ impl FileSystem for PassthroughFs {
         self.do_unlink(parent, name, 0)
     }
 
-    fn read<W: io::Write + ZeroCopyWriter>(
+    fn read<W: ZeroCopyWriter>(
         &self,
         _ctx: Context,
         inode: Inode,
@@ -1723,7 +1723,7 @@ impl FileSystem for PassthroughFs {
         w.write_from(&f, size as usize, offset)
     }
 
-    fn write<R: io::Read + ZeroCopyReader>(
+    fn write<R: ZeroCopyReader>(
         &self,
         _ctx: Context,
         inode: Inode,

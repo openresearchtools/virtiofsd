@@ -732,7 +732,7 @@ pub trait FileSystem {
     /// (`libc::O_DIRECT`), in which case the kernel will forward the return code from this method
     /// to the userspace application that made the system call.
     #[allow(clippy::too_many_arguments)]
-    fn read<W: io::Write + ZeroCopyWriter>(
+    fn read<W: ZeroCopyWriter>(
         &self,
         ctx: Context,
         inode: Self::Inode,
@@ -766,7 +766,7 @@ pub trait FileSystem {
     /// option (`libc::O_DIRECT`), in which case the kernel will forward the return code from this
     /// method to the userspace application that made the system call.
     #[allow(clippy::too_many_arguments)]
-    fn write<R: io::Read + ZeroCopyReader>(
+    fn write<R: ZeroCopyReader>(
         &self,
         ctx: Context,
         inode: Self::Inode,
