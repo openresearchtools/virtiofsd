@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::convert::TryInto;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::sync::atomic::AtomicBool;
@@ -133,76 +132,6 @@ pub trait ZeroCopyReader {
         off: u64,
         flags: Option<oslib::WritevFlags>,
     ) -> io::Result<usize>;
-
-    /// Copies exactly `count` bytes of data from `self` into `f` at offset `off`. `off + count`
-    /// must be less than `u64::MAX`.
-    ///
-    /// # Errors
-    ///
-    /// If an error is returned then the number of bytes copied from `self` is unspecified but it
-    /// will never be more than `count`.
-    fn read_exact_to(
-        &mut self,
-        f: &mut File,
-        mut count: usize,
-        mut off: u64,
-        flags: Option<oslib::WritevFlags>,
-    ) -> io::Result<()> {
-        let c = count
-            .try_into()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        if off.checked_add(c).is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "`off` + `count` must be less than u64::MAX",
-            ));
-        }
-
-        while count > 0 {
-            match self.read_to(f, count, off, flags) {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to fill whole buffer",
-                    ))
-                }
-                Ok(n) => {
-                    count -= n;
-                    off += n as u64;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Copies all remaining bytes from `self` into `f` at offset `off`. Equivalent to repeatedly
-    /// calling `read_to` until it returns either `Ok(0)` or a non-`ErrorKind::Interrupted` error.
-    ///
-    /// # Errors
-    ///
-    /// If an error is returned then the number of bytes copied from `self` is unspecified.
-    fn copy_to_end(
-        &mut self,
-        f: &mut File,
-        mut off: u64,
-        flags: Option<oslib::WritevFlags>,
-    ) -> io::Result<usize> {
-        let mut out = 0;
-        loop {
-            match self.read_to(f, usize::MAX, off, flags) {
-                Ok(0) => return Ok(out),
-                Ok(n) => {
-                    off = off.saturating_add(n as u64);
-                    out += n;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-    }
 }
 
 impl<R: ZeroCopyReader> ZeroCopyReader for &mut R {
@@ -214,23 +143,6 @@ impl<R: ZeroCopyReader> ZeroCopyReader for &mut R {
         flags: Option<oslib::WritevFlags>,
     ) -> io::Result<usize> {
         (**self).read_to(f, count, off, flags)
-    }
-    fn read_exact_to(
-        &mut self,
-        f: &mut File,
-        count: usize,
-        off: u64,
-        flags: Option<oslib::WritevFlags>,
-    ) -> io::Result<()> {
-        (**self).read_exact_to(f, count, off, flags)
-    }
-    fn copy_to_end(
-        &mut self,
-        f: &mut File,
-        off: u64,
-        flags: Option<oslib::WritevFlags>,
-    ) -> io::Result<usize> {
-        (**self).copy_to_end(f, off, flags)
     }
 }
 
@@ -251,79 +163,11 @@ pub trait ZeroCopyWriter {
     /// from `f`. If the underlying read from `f` returns `0` then the implementation must return an
     /// error of the kind `io::ErrorKind::UnexpectedEof`.
     fn write_from(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize>;
-
-    /// Copies exactly `count` bytes of data from `f` at offset `off` into `self`. `off + count`
-    /// must be less than `u64::MAX`.
-    ///
-    /// # Errors
-    ///
-    /// If an error is returned then the number of bytes copied from `self` is unspecified but it
-    /// well never be more than `count`.
-    fn write_all_from(&mut self, f: &mut File, mut count: usize, mut off: u64) -> io::Result<()> {
-        let c = count
-            .try_into()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        if off.checked_add(c).is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "`off` + `count` must be less than u64::MAX",
-            ));
-        }
-
-        while count > 0 {
-            match self.write_from(f, count, off) {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "failed to write whole buffer",
-                    ))
-                }
-                Ok(n) => {
-                    // No need for checked math here because we verified that `off + count` will not
-                    // overflow and `n` must be <= `count`.
-                    count -= n;
-                    off += n as u64;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Copies all remaining bytes from `f` at offset `off` into `self`. Equivalent to repeatedly
-    /// calling `write_from` until it returns either `Ok(0)` or a non-`ErrorKind::Interrupted`
-    /// error.
-    ///
-    /// # Errors
-    ///
-    /// If an error is returned then the number of bytes copied from `f` is unspecified.
-    fn copy_to_end(&mut self, f: &mut File, mut off: u64) -> io::Result<usize> {
-        let mut out = 0;
-        loop {
-            match self.write_from(f, usize::MAX, off) {
-                Ok(0) => return Ok(out),
-                Ok(n) => {
-                    off = off.saturating_add(n as u64);
-                    out += n;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-    }
 }
 
 impl<W: ZeroCopyWriter> ZeroCopyWriter for &mut W {
     fn write_from(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
         (**self).write_from(f, count, off)
-    }
-    fn write_all_from(&mut self, f: &mut File, count: usize, off: u64) -> io::Result<()> {
-        (**self).write_all_from(f, count, off)
-    }
-    fn copy_to_end(&mut self, f: &mut File, off: u64) -> io::Result<usize> {
-        (**self).copy_to_end(f, off)
     }
 }
 
