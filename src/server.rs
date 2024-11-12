@@ -33,19 +33,49 @@ impl ZeroCopyReader for ZcReader<'_> {
     fn write_to_file_at(
         &mut self,
         f: &File,
-        count: usize,
-        off: u64,
+        mut count: usize,
+        mut off: u64,
         flags: Option<oslib::WritevFlags>,
     ) -> io::Result<usize> {
-        self.0.write_to_file_at(f, count, off, flags)
+        let start = off;
+        while count > 0 {
+            let written = self.0.write_to_file_at(f, count, off, flags)?;
+            if written == 0 {
+                break;
+            }
+            off = off
+                .checked_add(written as u64)
+                .ok_or_else(|| io::Error::other("Write wrap-around"))?;
+            count = count
+                .checked_sub(written)
+                .ok_or_else(|| io::Error::other("Write operation wrote more than requested"))?;
+        }
+
+        // Must fit: Cannot be greater than `count` originally
+        Ok((off - start) as usize)
     }
 }
 
 struct ZcWriter<'a>(Writer<'a>);
 
 impl ZeroCopyWriter for ZcWriter<'_> {
-    fn read_from_file_at(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
-        self.0.read_from_file_at(f, count, off)
+    fn read_from_file_at(&mut self, f: &File, mut count: usize, mut off: u64) -> io::Result<usize> {
+        let start = off;
+        while count > 0 {
+            let read = self.0.read_from_file_at(f, count, off)?;
+            if read == 0 {
+                break;
+            }
+            off = off
+                .checked_add(read as u64)
+                .ok_or_else(|| io::Error::other("Read wrap-around"))?;
+            count = count
+                .checked_sub(read)
+                .ok_or_else(|| io::Error::other("Read operation wrote more than requested"))?;
+        }
+
+        // Must fit: Cannot be greater than `count` originally
+        Ok((off - start) as usize)
     }
 }
 

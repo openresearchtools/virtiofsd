@@ -120,11 +120,9 @@ pub trait ZeroCopyReader {
     /// 2. There is no more space in `f`.
     /// 3. `count` was `0`.
     ///
-    /// # Errors
-    ///
-    /// If any error is returned then the implementation must guarantee that no bytes were copied
-    /// from `self`. If the underlying write to `f` returns `0` then the implementation must return
-    /// an error of the kind `io::ErrorKind::WriteZero`.
+    /// Does not do short writes, unless one of the above happens; i.e. will invoke the underlying
+    /// file write function until `count` bytes have been written or it returns 0 (case 2 above) or
+    /// `self` is empty (case 1 above).
     fn write_to_file_at(
         &mut self,
         f: &File,
@@ -151,17 +149,16 @@ impl<R: ZeroCopyReader> ZeroCopyReader for &mut R {
 pub trait ZeroCopyWriter {
     /// Copies at most `count` bytes from `f` at offset `off` directly into `self` without storing
     /// it in any intermediate buffers. If the return value is `Ok(n)` then it must be guaranteed
-    /// that `0 <= n <= count`. If `n` is `0`, then it can indicate one of 3 possibilities:
+    /// that `0 <= n <= count`. If `n` is `0`, then it can indicate one of 4 possibilities:
     ///
     /// 1. There is no more data left in `f`.
-    /// 2. There is no more space in `self`.
-    /// 3. `count` was `0`.
+    /// 2. End of `f` reached.
+    /// 3. There is no more space in `self`.
+    /// 4. `count` was `0`.
     ///
-    /// # Errors
-    ///
-    /// If any error is returned then the implementation must guarantee that no bytes were copied
-    /// from `f`. If the underlying read from `f` returns `0` then the implementation must return an
-    /// error of the kind `io::ErrorKind::UnexpectedEof`.
+    /// Does not do short reads, unless one of the above happens; i.e. will invoke the underlying
+    /// file read function until `count` bytes have been read or it returns 0 (cases 1 or 2 above)
+    /// or `self` has no more space (case 2 above).
     fn read_from_file_at(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize>;
 }
 
