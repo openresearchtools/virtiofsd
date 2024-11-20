@@ -11,7 +11,6 @@ pub mod stat;
 pub mod util;
 pub mod xattrmap;
 
-use super::fs_cache_req_handler::FsCacheReqHandler;
 use crate::filesystem::{
     Context, Entry, Extensions, FileSystem, FsOptions, GetxattrReply, ListxattrReply, OpenOptions,
     SecContext, SetattrValid, SetxattrFlags, ZeroCopyReader, ZeroCopyWriter,
@@ -1703,41 +1702,6 @@ impl FileSystem for PassthroughFs {
 
     fn unlink(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
         self.do_unlink(parent, name, 0)
-    }
-
-    fn setupmapping<T: FsCacheReqHandler>(
-        &self,
-        _ctx: Context,
-        inode: Inode,
-        _handle: Handle,
-        foffset: u64,
-        len: u64,
-        flags: u64,
-        moffset: u64,
-        vu_req: &mut T,
-    ) -> io::Result<()> {
-        debug!(
-            "setupmapping: ino {:?} foffset {} len {} flags {} moffset {}",
-            inode, foffset, len, flags, moffset
-        );
-
-        let open_flags = if (flags & fuse::SetupmappingFlags::WRITE.bits()) != 0 {
-            libc::O_RDWR
-        } else {
-            libc::O_RDONLY
-        };
-
-        let file = self.open_inode(inode, open_flags)?;
-        (*vu_req).map(foffset, moffset, len, flags, file.as_raw_fd())
-    }
-
-    fn removemapping<T: FsCacheReqHandler>(
-        &self,
-        _ctx: Context,
-        requests: Vec<fuse::RemovemappingOne>,
-        vu_req: &mut T,
-    ) -> io::Result<()> {
-        (*vu_req).unmap(requests)
     }
 
     fn read<W: io::Write + ZeroCopyWriter>(
