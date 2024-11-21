@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+use crate::util::ResultErrorContext;
 use bitflags::bitflags;
 use std::ffi::{CStr, CString};
 use std::fs::File;
@@ -186,6 +187,7 @@ pub fn openat(dir: &impl AsRawFd, pathname: &CStr, flags: i32, mode: Option<u32>
             mode,
         )
     })
+    .err_context(|| pathname.to_string_lossy())
 }
 
 /// An utility function that uses `openat2(2)` to restrict the how the provided pathname
@@ -233,6 +235,7 @@ pub fn do_open_relative_to(
             std::mem::size_of::<libc::open_how>(),
         )
     } as RawFd)
+    .err_context(|| pathname.to_string_lossy())
 }
 
 mod filehandle {

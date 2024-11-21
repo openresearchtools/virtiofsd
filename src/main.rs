@@ -787,10 +787,7 @@ fn main() {
     let fs = match PassthroughFs::new(fs_cfg) {
         Ok(fs) => fs,
         Err(e) => {
-            error!(
-                "Failed to create internal filesystem representation: {:?}",
-                e
-            );
+            error!("Failed to create internal filesystem representation: {e}");
             process::exit(1);
         }
     };

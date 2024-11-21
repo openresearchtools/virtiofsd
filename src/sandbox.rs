@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{idmap, oslib, util};
+use crate::util::{self, ErrorContext};
+use crate::{idmap, oslib};
 use idmap::{GidMap, IdMapSetUpPipeMessage, UidMap};
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -302,7 +303,9 @@ impl Sandbox {
         let mountinfo_fd =
             unsafe { libc::openat(proc_self.as_raw_fd(), c_mountinfo.as_ptr(), libc::O_RDONLY) };
         if mountinfo_fd < 0 {
-            return Err(Error::OpenMountinfo(std::io::Error::last_os_error()));
+            return Err(Error::OpenMountinfo(
+                std::io::Error::last_os_error().context("mountinfo"),
+            ));
         }
         // Safe because we just opened this fd.
         self.mountinfo_fd = Some(unsafe { File::from_raw_fd(mountinfo_fd) });
