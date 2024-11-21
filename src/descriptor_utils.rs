@@ -248,11 +248,12 @@ impl<'a, B: Bitmap + BitmapSlice + 'static> Reader<'a, B> {
         Ok(unsafe { obj.assume_init() })
     }
 
-    /// Reads data from the descriptor chain buffer into a File at offset `off`.
-    /// Returns the number of bytes read from the descriptor chain buffer.
-    /// The number of bytes read can be less than `count` if there isn't
-    /// enough data in the descriptor chain buffer.
-    pub fn read_to_at<F: FileReadWriteAtVolatile<B>>(
+    /// Write data from the descriptor chain buffer into a File at offset `off`.
+    ///
+    /// Return the number of bytes written.  This can be less than `count` if there isn't enough
+    /// data in the descriptor chain buffer, or if the file’s write function performed a short
+    /// write.
+    pub fn write_to_file_at<F: FileReadWriteAtVolatile<B>>(
         &mut self,
         dst: F,
         count: usize,
@@ -373,11 +374,11 @@ impl<'a, B: Bitmap + BitmapSlice + 'static> Writer<'a, B> {
         self.buffer.available_bytes()
     }
 
-    /// Writes data to the descriptor chain buffer from a File at offset `off`.
-    /// Returns the number of bytes written to the descriptor chain buffer.
-    /// The number of bytes written can be less than `count` if
-    /// there isn't enough data in the descriptor chain buffer.
-    pub fn write_from_at<F: FileReadWriteAtVolatile<B>>(
+    /// Read data into the descriptor chain buffer from a File at offset `off`.
+    ///
+    /// Return the number of bytes read.  This can be less than `count` if there isn't enough data
+    /// in the descriptor chain buffer, or if the file’s read function performed a short read.
+    pub fn read_from_file_at<F: FileReadWriteAtVolatile<B>>(
         &mut self,
         src: F,
         count: usize,

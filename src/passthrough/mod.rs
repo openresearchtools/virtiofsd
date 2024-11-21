@@ -1704,7 +1704,7 @@ impl FileSystem for PassthroughFs {
         self.do_unlink(parent, name, 0)
     }
 
-    fn read<W: io::Write + ZeroCopyWriter>(
+    fn read<W: ZeroCopyWriter>(
         &self,
         _ctx: Context,
         inode: Inode,
@@ -1717,13 +1717,13 @@ impl FileSystem for PassthroughFs {
     ) -> io::Result<usize> {
         let data = self.find_handle(handle, inode)?;
 
-        // This is safe because write_from uses preadv64, so the underlying file descriptor
+        // This is safe because read_from_file_at uses preadv64, so the underlying file descriptor
         // offset is not affected by this operation.
         let f = data.file.get()?.read().unwrap();
-        w.write_from(&f, size as usize, offset)
+        w.read_from_file_at(&f, size as usize, offset)
     }
 
-    fn write<R: io::Read + ZeroCopyReader>(
+    fn write<R: ZeroCopyReader>(
         &self,
         _ctx: Context,
         inode: Inode,
@@ -1738,8 +1738,8 @@ impl FileSystem for PassthroughFs {
     ) -> io::Result<usize> {
         let data = self.find_handle(handle, inode)?;
 
-        // This is safe because read_to uses `pwritev2(2)`, so the underlying file descriptor
-        // offset is not affected by this operation.
+        // This is safe because write_to_file_at uses `pwritev2(2)`, so the underlying file
+        // descriptor offset is not affected by this operation.
         let f = data.file.get()?.read().unwrap();
 
         {
@@ -1762,7 +1762,7 @@ impl FileSystem for PassthroughFs {
             // write on the underlying file is performed in append mode.
             let is_append = flags & libc::O_APPEND as u32 != 0;
             let flags = (!delayed_write && is_append).then_some(oslib::WritevFlags::RWF_APPEND);
-            r.read_to(&f, size as usize, offset, flags)
+            r.write_to_file_at(&f, size as usize, offset, flags)
         }
     }
 

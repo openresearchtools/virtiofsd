@@ -30,38 +30,52 @@ const PARENT_DIR_CSTR: &[u8] = b"..";
 struct ZcReader<'a>(Reader<'a>);
 
 impl ZeroCopyReader for ZcReader<'_> {
-    fn read_to(
+    fn write_to_file_at(
         &mut self,
         f: &File,
-        count: usize,
-        off: u64,
+        mut count: usize,
+        mut off: u64,
         flags: Option<oslib::WritevFlags>,
     ) -> io::Result<usize> {
-        self.0.read_to_at(f, count, off, flags)
-    }
-}
+        let start = off;
+        while count > 0 {
+            let written = self.0.write_to_file_at(f, count, off, flags)?;
+            if written == 0 {
+                break;
+            }
+            off = off
+                .checked_add(written as u64)
+                .ok_or_else(|| io::Error::other("Write wrap-around"))?;
+            count = count
+                .checked_sub(written)
+                .ok_or_else(|| io::Error::other("Write operation wrote more than requested"))?;
+        }
 
-impl io::Read for ZcReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
+        // Must fit: Cannot be greater than `count` originally
+        Ok((off - start) as usize)
     }
 }
 
 struct ZcWriter<'a>(Writer<'a>);
 
 impl ZeroCopyWriter for ZcWriter<'_> {
-    fn write_from(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
-        self.0.write_from_at(f, count, off)
-    }
-}
+    fn read_from_file_at(&mut self, f: &File, mut count: usize, mut off: u64) -> io::Result<usize> {
+        let start = off;
+        while count > 0 {
+            let read = self.0.read_from_file_at(f, count, off)?;
+            if read == 0 {
+                break;
+            }
+            off = off
+                .checked_add(read as u64)
+                .ok_or_else(|| io::Error::other("Read wrap-around"))?;
+            count = count
+                .checked_sub(read)
+                .ok_or_else(|| io::Error::other("Read operation wrote more than requested"))?;
+        }
 
-impl io::Write for ZcWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
+        // Must fit: Cannot be greater than `count` originally
+        Ok((off - start) as usize)
     }
 }
 
