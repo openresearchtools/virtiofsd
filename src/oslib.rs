@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+use crate::soft_idmap::{HostGid, HostUid, Id};
 use crate::util::ResultErrorContext;
 use bitflags::bitflags;
 use std::ffi::{CStr, CString};
@@ -521,20 +522,21 @@ pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {
 // setfsgid systems calls. However since those calls have no way to
 // return an error, it's preferable to do this instead.
 /// Set effective user ID
-pub fn seteffuid(uid: libc::uid_t) -> io::Result<()> {
-    check_retval(unsafe { libc::syscall(libc::SYS_setresuid, -1, uid, -1) })?;
+pub fn seteffuid(uid: HostUid) -> io::Result<()> {
+    check_retval(unsafe { libc::syscall(libc::SYS_setresuid, -1, uid.into_inner(), -1) })?;
     Ok(())
 }
 
 /// Set effective group ID
-pub fn seteffgid(gid: libc::gid_t) -> io::Result<()> {
-    check_retval(unsafe { libc::syscall(libc::SYS_setresgid, -1, gid, -1) })?;
+pub fn seteffgid(gid: HostGid) -> io::Result<()> {
+    check_retval(unsafe { libc::syscall(libc::SYS_setresgid, -1, gid.into_inner(), -1) })?;
     Ok(())
 }
 
 /// Set supplementary group
-pub fn setsupgroup(gid: libc::gid_t) -> io::Result<()> {
-    check_retval(unsafe { libc::setgroups(1, &gid) })?;
+pub fn setsupgroup(gid: HostGid) -> io::Result<()> {
+    let gid_raw = gid.into_inner();
+    check_retval(unsafe { libc::setgroups(1, &gid_raw) })?;
     Ok(())
 }
 

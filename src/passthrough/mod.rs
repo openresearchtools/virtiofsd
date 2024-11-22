@@ -15,7 +15,7 @@ use crate::filesystem::{
     Context, Entry, Extensions, FileSystem, FsOptions, GetxattrReply, ListxattrReply, OpenOptions,
     SecContext, SetattrValid, SetxattrFlags, ZeroCopyReader, ZeroCopyWriter,
 };
-use crate::passthrough::credentials::{drop_effective_cap, UnixCredentials};
+use crate::passthrough::credentials::{drop_effective_cap, UnixCredentials, UnixCredentialsGuard};
 use crate::passthrough::device_state::preserialization::{
     self, HandleMigrationInfo, InodeMigrationInfo,
 };
@@ -24,6 +24,7 @@ use crate::passthrough::inode_store::{
 };
 use crate::passthrough::util::{ebadf, is_safe_inode, openat, reopen_fd_through_proc};
 use crate::read_dir::ReadDir;
+use crate::soft_idmap::{self, GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
 use crate::util::{other_io_error, ResultErrorContext};
 use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
@@ -31,6 +32,7 @@ use mount_fd::{MPRError, MountFds};
 use stat::{statx, StatExt};
 use std::borrow::Cow;
 use std::collections::{btree_map, BTreeMap};
+use std::convert::TryInto;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
@@ -367,6 +369,20 @@ pub struct Config {
     ///
     /// The default is `FindPaths`.
     pub migration_mode: MigrationMode,
+
+    /**
+     * UID map parameters given on the command line.
+     *
+     * Is `take()`n when `PassthroughFs` is created, i.e. `None` during runtime.
+     */
+    pub uid_map: Option<Vec<soft_idmap::cmdline::IdMap>>,
+
+    /**
+     * GID map parameters given on the command line.
+     *
+     * Is `take()`n when `PassthroughFs` is created, i.e. `None` during runtime.
+     */
+    pub gid_map: Option<Vec<soft_idmap::cmdline::IdMap>>,
 }
 
 impl Default for Config {
@@ -396,6 +412,8 @@ impl Default for Config {
             migration_verify_handles: false,
             migration_confirm_paths: false,
             migration_mode: MigrationMode::FindPaths,
+            uid_map: None,
+            gid_map: None,
         }
     }
 }
@@ -454,6 +472,12 @@ pub struct PassthroughFs {
     track_migration_info: AtomicBool,
 
     cfg: Config,
+
+    /// Map to translate between host and guest UIDs.
+    uid_map: IdMap<GuestUid, HostUid>,
+
+    /// Map to translate between host and guest GIDs.
+    gid_map: IdMap<GuestGid, HostGid>,
 }
 
 impl PassthroughFs {
@@ -491,6 +515,18 @@ impl PassthroughFs {
             Some(MountFds::new(mountinfo_fd, cfg.mountinfo_prefix.clone()))
         };
 
+        let uid_map = if let Some(map) = cfg.uid_map.take() {
+            map.try_into().err_context(|| "UID map")?
+        } else {
+            IdMap::empty()
+        };
+
+        let gid_map = if let Some(map) = cfg.gid_map.take() {
+            map.try_into().err_context(|| "GID map")?
+        } else {
+            IdMap::empty()
+        };
+
         let mut fs = PassthroughFs {
             inodes: Default::default(),
             next_inode: AtomicU64::new(fuse::ROOT_ID + 1),
@@ -506,6 +542,8 @@ impl PassthroughFs {
             os_facts: oslib::OsFacts::new(),
             track_migration_info: AtomicBool::new(false),
             cfg,
+            uid_map,
+            gid_map,
         };
 
         // Check to see if the client remapped "security.capability", if so,
@@ -851,14 +889,19 @@ impl PassthroughFs {
             self.inodes.get_or_insert(inode_data)?
         };
 
+        let attr = fuse::Attr::try_with_flags(
+            st.st,
+            attr_flags,
+            |uid| self.map_host_uid(uid),
+            |gid| self.map_host_gid(gid),
+        )?;
         Ok(Entry {
             // By leaking, we transfer ownership of this refcount to the guest.  That is safe,
             // because the guest is expected to explicitly release its reference and decrement the
             // refcount via `FORGET` later.
             inode: unsafe { inode.leak() },
             generation: 0,
-            attr: st.st,
-            attr_flags,
+            attr,
             attr_timeout: self.cfg.attr_timeout,
             entry_timeout: self.cfg.entry_timeout,
         })
@@ -944,12 +987,17 @@ impl PassthroughFs {
         Err(ebadf())
     }
 
-    fn do_getattr(&self, inode: Inode) -> io::Result<(libc::stat64, Duration)> {
+    fn do_getattr(&self, inode: Inode) -> io::Result<(fuse::Attr, Duration)> {
         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
         let inode_file = data.get_file()?;
         let st = statx(&inode_file, None)?.st;
+        let attr = fuse::Attr::try_from_stat64(
+            st,
+            |uid| self.map_host_uid(uid),
+            |gid| self.map_host_gid(gid),
+        )?;
 
-        Ok((st, self.cfg.attr_timeout))
+        Ok((attr, self.cfg.attr_timeout))
     }
 
     fn do_unlink(&self, parent: Inode, name: &CStr, flags: libc::c_int) -> io::Result<()> {
@@ -1095,12 +1143,7 @@ impl PassthroughFs {
         extensions: Extensions,
     ) -> io::Result<RawFd> {
         let fd = {
-            let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
-                .supplementary_gid(
-                    self.sup_group_extension.load(Ordering::Relaxed),
-                    extensions.sup_gid,
-                )
-                .set()?;
+            let _credentials_guard = self.unix_credentials_guard(ctx, &extensions)?;
             let _umask_guard = self
                 .posix_acl
                 .load(Ordering::Relaxed)
@@ -1395,6 +1438,50 @@ impl PassthroughFs {
         )
         .map_err(preserialization::proc_paths::WrappedError::into_inner)
     }
+
+    /**
+     * Temporarily changes the effective UID and GID.
+     *
+     * Changes the effective UID and GID to the one required by `ctx`, potentially including a
+     * supplementary GID given in `extensions`.  Return to the previous state once the returned
+     * guard is dropped.
+     */
+    fn unix_credentials_guard(
+        &self,
+        ctx: &Context,
+        extensions: &Extensions,
+    ) -> io::Result<Option<UnixCredentialsGuard>> {
+        let host_uid = self.map_guest_uid(ctx.uid)?;
+        let host_gid = self.map_guest_gid(ctx.gid)?;
+        let supp_gid = extensions
+            .sup_gid
+            .map(|gid| self.map_guest_gid(gid))
+            .transpose()?;
+
+        UnixCredentials::new(host_uid, host_gid)
+            .supplementary_gid(self.sup_group_extension.load(Ordering::Relaxed), supp_gid)
+            .set()
+    }
+
+    /// Translate `guest_uid` to a host UID using [`self.uid_map`](`Self#structfield.uid_map`).
+    fn map_guest_uid(&self, guest_uid: GuestUid) -> io::Result<HostUid> {
+        self.uid_map.map_guest(guest_uid).map_err(Into::into)
+    }
+
+    /// Translate `guest_gid` to a host GID using [`self.gid_map`](`Self#structfield.gid_map`).
+    fn map_guest_gid(&self, guest_gid: GuestGid) -> io::Result<HostGid> {
+        self.gid_map.map_guest(guest_gid).map_err(Into::into)
+    }
+
+    /// Translate `host_uid` to a guest UID using [`self.uid_map`](`Self#structfield.uid_map`).
+    fn map_host_uid(&self, host_uid: HostUid) -> io::Result<GuestUid> {
+        self.uid_map.map_host(host_uid).map_err(Into::into)
+    }
+
+    /// Translate `host_gid` to a guest GID using [`self.gid_map`](`Self#structfield.gid_map`).
+    fn map_host_gid(&self, host_gid: HostGid) -> io::Result<GuestGid> {
+        self.gid_map.map_host(host_gid).map_err(Into::into)
+    }
 }
 
 impl FileSystem for PassthroughFs {
@@ -1539,12 +1626,7 @@ impl FileSystem for PassthroughFs {
 
         let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
-            let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
-                .supplementary_gid(
-                    self.sup_group_extension.load(Ordering::Relaxed),
-                    extensions.sup_gid,
-                )
-                .set()?;
+            let _credentials_guard = self.unix_credentials_guard(&ctx, &extensions)?;
             let _umask_guard = self
                 .posix_acl
                 .load(Ordering::Relaxed)
@@ -1771,7 +1853,7 @@ impl FileSystem for PassthroughFs {
         _ctx: Context,
         inode: Inode,
         _handle: Option<Handle>,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(fuse::Attr, Duration)> {
         self.do_getattr(inode)
     }
 
@@ -1779,10 +1861,10 @@ impl FileSystem for PassthroughFs {
         &self,
         _ctx: Context,
         inode: Inode,
-        attr: libc::stat64,
+        attr: fuse::SetattrIn,
         handle: Option<Handle>,
         valid: SetattrValid,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(fuse::Attr, Duration)> {
         let inode_data = self.inodes.get(inode).ok_or_else(ebadf)?;
 
         // In this case, we need to open a new O_RDWR FD
@@ -1816,9 +1898,9 @@ impl FileSystem for PassthroughFs {
             // Safe because this doesn't modify any memory and we check the return value.
             let res = unsafe {
                 match data {
-                    Data::Handle(_, fd) => libc::fchmod(fd, attr.st_mode),
+                    Data::Handle(_, fd) => libc::fchmod(fd, attr.mode),
                     Data::ProcPath(ref p) => {
-                        libc::fchmodat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), attr.st_mode, 0)
+                        libc::fchmodat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), attr.mode, 0)
                     }
                 }
             };
@@ -1829,13 +1911,13 @@ impl FileSystem for PassthroughFs {
 
         if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
             let uid = if valid.contains(SetattrValid::UID) {
-                attr.st_uid
+                self.map_guest_uid(attr.uid)?.into_inner()
             } else {
                 // Cannot use -1 here because these are unsigned values.
                 u32::MAX
             };
             let gid = if valid.contains(SetattrValid::GID) {
-                attr.st_gid
+                self.map_guest_gid(attr.gid)?.into_inner()
             } else {
                 // Cannot use -1 here because these are unsigned values.
                 u32::MAX
@@ -1881,7 +1963,7 @@ impl FileSystem for PassthroughFs {
             // Safe because this doesn't modify any memory and we check the return value.
             let res = self
                 .clear_file_capabilities(fd, false)
-                .map(|_| unsafe { libc::ftruncate(fd, attr.st_size) })?;
+                .map(|_| unsafe { libc::ftruncate(fd, attr.size as i64) })?;
             if res < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -1902,15 +1984,15 @@ impl FileSystem for PassthroughFs {
             if valid.contains(SetattrValid::ATIME_NOW) {
                 tvs[0].tv_nsec = libc::UTIME_NOW;
             } else if valid.contains(SetattrValid::ATIME) {
-                tvs[0].tv_sec = attr.st_atime;
-                tvs[0].tv_nsec = attr.st_atime_nsec;
+                tvs[0].tv_sec = attr.atime as i64;
+                tvs[0].tv_nsec = attr.atimensec.into();
             }
 
             if valid.contains(SetattrValid::MTIME_NOW) {
                 tvs[1].tv_nsec = libc::UTIME_NOW;
             } else if valid.contains(SetattrValid::MTIME) {
-                tvs[1].tv_sec = attr.st_mtime;
-                tvs[1].tv_nsec = attr.st_mtime_nsec;
+                tvs[1].tv_sec = attr.mtime as i64;
+                tvs[1].tv_nsec = attr.mtimensec.into();
             }
 
             // Safe because this doesn't modify any memory and we check the return value.
@@ -1989,12 +2071,7 @@ impl FileSystem for PassthroughFs {
 
         let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
-            let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
-                .supplementary_gid(
-                    self.sup_group_extension.load(Ordering::Relaxed),
-                    extensions.sup_gid,
-                )
-                .set()?;
+            let _credentials_guard = self.unix_credentials_guard(&ctx, &extensions)?;
             let _umask_guard = self
                 .posix_acl
                 .load(Ordering::Relaxed)
@@ -2080,12 +2157,7 @@ impl FileSystem for PassthroughFs {
 
         let invalidated_inode = self.before_invalidating_path(&data, name);
         let res = {
-            let _credentials_guard = UnixCredentials::new(ctx.uid, ctx.gid)
-                .supplementary_gid(
-                    self.sup_group_extension.load(Ordering::Relaxed),
-                    extensions.sup_gid,
-                )
-                .set()?;
+            let _credentials_guard = self.unix_credentials_guard(&ctx, &extensions)?;
 
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe { libc::symlinkat(linkname.as_ptr(), parent_file.as_raw_fd(), name.as_ptr()) }
@@ -2212,19 +2284,22 @@ impl FileSystem for PassthroughFs {
         // ("fs/fuse: warn if fuse_access is called when idmapped mounts are allowed").
         // In case when idmapped mounts are not enabled we are good to rely on ctx.uid/ctx.gid values.
 
+        let st_uid = self.map_host_uid(HostUid::from(st.st_uid))?;
+        let st_gid = self.map_host_gid(HostGid::from(st.st_gid))?;
+
         if (mode & libc::R_OK) != 0
-            && ctx.uid != 0
-            && (st.st_uid != ctx.uid || st.st_mode & 0o400 == 0)
-            && (st.st_gid != ctx.gid || st.st_mode & 0o040 == 0)
+            && !ctx.uid.is_root()
+            && (st_uid != ctx.uid || st.st_mode & 0o400 == 0)
+            && (st_gid != ctx.gid || st.st_mode & 0o040 == 0)
             && st.st_mode & 0o004 == 0
         {
             return Err(io::Error::from_raw_os_error(libc::EACCES));
         }
 
         if (mode & libc::W_OK) != 0
-            && ctx.uid != 0
-            && (st.st_uid != ctx.uid || st.st_mode & 0o200 == 0)
-            && (st.st_gid != ctx.gid || st.st_mode & 0o020 == 0)
+            && !ctx.uid.is_root()
+            && (st_uid != ctx.uid || st.st_mode & 0o200 == 0)
+            && (st_gid != ctx.gid || st.st_mode & 0o020 == 0)
             && st.st_mode & 0o002 == 0
         {
             return Err(io::Error::from_raw_os_error(libc::EACCES));
@@ -2233,9 +2308,9 @@ impl FileSystem for PassthroughFs {
         // root can only execute something if it is executable by one of the owner, the group, or
         // everyone.
         if (mode & libc::X_OK) != 0
-            && (ctx.uid != 0 || st.st_mode & 0o111 == 0)
-            && (st.st_uid != ctx.uid || st.st_mode & 0o100 == 0)
-            && (st.st_gid != ctx.gid || st.st_mode & 0o010 == 0)
+            && (!ctx.uid.is_root() || st.st_mode & 0o111 == 0)
+            && (st_uid != ctx.uid || st.st_mode & 0o100 == 0)
+            && (st_gid != ctx.gid || st.st_mode & 0o010 == 0)
             && st.st_mode & 0o001 == 0
         {
             return Err(io::Error::from_raw_os_error(libc::EACCES));

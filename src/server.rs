@@ -9,6 +9,7 @@ use crate::filesystem::{
 };
 use crate::fuse::*;
 use crate::passthrough::util::einval;
+use crate::soft_idmap::GuestGid;
 use crate::{oslib, Error, Result};
 use std::convert::{TryFrom, TryInto};
 use std::ffi::{CStr, CString};
@@ -253,12 +254,12 @@ impl<F: FileSystem + Sync> Server<F> {
             .fs
             .getattr(Context::from(in_header), in_header.nodeid.into(), handle)
         {
-            Ok((st, timeout)) => {
+            Ok((attr, timeout)) => {
                 let out = AttrOut {
                     attr_valid: timeout.as_secs(),
                     attr_valid_nsec: timeout.subsec_nanos(),
                     dummy: 0,
-                    attr: st.into(),
+                    attr,
                 };
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -277,21 +278,19 @@ impl<F: FileSystem + Sync> Server<F> {
 
         let valid = SetattrValid::from_bits_truncate(setattr_in.valid);
 
-        let st: libc::stat64 = setattr_in.into();
-
         match self.fs.setattr(
             Context::from(in_header),
             in_header.nodeid.into(),
-            st,
+            setattr_in,
             handle,
             valid,
         ) {
-            Ok((st, timeout)) => {
+            Ok((attr, timeout)) => {
                 let out = AttrOut {
                     attr_valid: timeout.as_secs(),
                     attr_valid_nsec: timeout.subsec_nanos(),
                     dummy: 0,
-                    attr: st.into(),
+                    attr,
                 };
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -1061,16 +1060,15 @@ impl<F: FileSystem + Sync> Server<F> {
         let entry = if name == CURRENT_DIR_CSTR || name == PARENT_DIR_CSTR {
             // Don't do lookups on the current directory or the parent directory. Safe because
             // this only contains integer fields and any value is valid.
-            let mut attr = unsafe { MaybeUninit::<libc::stat64>::zeroed().assume_init() };
-            attr.st_ino = dir_entry.ino;
-            attr.st_mode = dir_entry.type_ << 12;
+            let mut attr = unsafe { MaybeUninit::<Attr>::zeroed().assume_init() };
+            attr.ino = dir_entry.ino;
+            attr.mode = dir_entry.type_ << 12;
 
             // We use 0 for the inode value to indicate a negative entry.
             Entry {
                 inode: 0,
                 generation: 0,
                 attr,
-                attr_flags: 0,
                 attr_timeout: Duration::from_secs(0),
                 entry_timeout: Duration::from_secs(0),
             }
@@ -1275,15 +1273,7 @@ impl<F: FileSystem + Sync> Server<F> {
             extensions,
         ) {
             Ok((entry, handle, opts)) => {
-                let entry_out = EntryOut {
-                    nodeid: entry.inode,
-                    generation: entry.generation,
-                    entry_valid: entry.entry_timeout.as_secs(),
-                    attr_valid: entry.attr_timeout.as_secs(),
-                    entry_valid_nsec: entry.entry_timeout.subsec_nanos(),
-                    attr_valid_nsec: entry.attr_timeout.subsec_nanos(),
-                    attr: Attr::with_flags(entry.attr, entry.attr_flags),
-                };
+                let entry_out = EntryOut::from(entry);
                 let open_out = OpenOut {
                     fh: handle.map(Into::into).unwrap_or(0),
                     open_flags: opts.bits(),
@@ -1700,7 +1690,7 @@ fn parse_security_context(nr_secctx: u32, data: &[u8]) -> Result<Option<SecConte
     Ok(Some(fuse_secctx))
 }
 
-fn parse_sup_groups(data: &[u8]) -> Result<u32> {
+fn parse_sup_groups(data: &[u8]) -> Result<GuestGid> {
     let (group_header, group_id_bytes) = take_object::<SuppGroups>(data)?;
 
     // The FUSE extension allows sending several group IDs, but currently the guest
@@ -1710,7 +1700,7 @@ fn parse_sup_groups(data: &[u8]) -> Result<u32> {
     }
 
     let (gid, _) = take_object::<u32>(group_id_bytes)?;
-    Ok(gid)
+    Ok(gid.into())
 }
 
 fn get_extensions(options: FsOptions, skip: usize, request_bytes: &[u8]) -> Result<Extensions> {

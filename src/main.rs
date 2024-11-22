@@ -28,7 +28,7 @@ use virtiofsd::sandbox::{Sandbox, SandboxMode};
 use virtiofsd::seccomp::{enable_seccomp, SeccompAction};
 use virtiofsd::util::write_pid_file;
 use virtiofsd::vhost_user::{Error, VhostUserFsBackendBuilder, MAX_TAG_LEN};
-use virtiofsd::{limits, oslib};
+use virtiofsd::{limits, oslib, soft_idmap};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 
 type Result<T> = std::result::Result<T, Error>;
@@ -251,6 +251,9 @@ struct Opt {
     /// Map a range of UIDs from the host into the namespace, given as
     /// :namespace_uid:host_uid:count:
     ///
+    /// As opposed to '--translate-uid', this mapping is not done by virtiofsd, but by the
+    /// user namespace into which virtiofsd is placed via '--sandbox=namespace'.
+    ///
     /// For example, :0:100000:65536: will map the 65536 host UIDs [100000, 165535]
     /// into the namespace as [0, 65535].
     ///
@@ -261,12 +264,48 @@ struct Opt {
     /// Map a range of GIDs from the host into the namespace, given as
     /// :namespace_gid:host_gid:count:
     ///
+    /// As opposed to '--translate-gid', this mapping is not done by virtiofsd, but by the
+    /// user namespace into which virtiofsd is placed via '--sandbox=namespace'.
+    ///
     /// For example, :0:100000:65536: will map the 65536 host GIDs [100000, 165535]
     /// into the namespace as [0, 65535].
     ///
     /// Provide this argument multiple times to map multiple GID ranges.
     #[arg(long)]
     gid_map: Vec<GidMap>,
+
+    /// Describe how to translate UIDs between guest and host, given as
+    /// '<type>:<source base>:<target base>:<count>'.
+    ///
+    /// As opposed to '--uid-map', this mapping is done internally by virtiofsd, and does not
+    /// require using a user namespace.
+    ///
+    /// 'type' describes how to do the mapping, and in which direction:
+    ///
+    /// - 'guest': 1:1 map a range of guest UIDs to host UIDs
+    ///
+    /// - 'host': 1:1 map a range of host UIDs to guest UIDs
+    ///
+    /// - 'squash-guest': n:1 map a range of guest UIDs all to a single host UID
+    ///
+    /// - 'squash-host': n:1 map a range of host UIDs all to a single guest UID
+    ///
+    /// - 'forbid-guest': Forbid guest UIDs in the given range: Return an error to the guest
+    ///   whenever it tries to create a file with such a UID or make a file have such a UID
+    ///
+    /// - 'map': bidirectionally 1:1 map between a range of guest UIDs and host UIDs; the
+    ///   order is: 'map:<guest base>:<host base>:<count>'
+    ///
+    /// Provide this argument multiple times to map multiple UID ranges.
+    ///
+    /// Cannot be used together with --posix-acl; translating UIDs (or GIDs) in virtiofsd would
+    /// break posix ACLs.
+    #[arg(long, conflicts_with = "posix_acl")]
+    translate_uid: Vec<soft_idmap::cmdline::IdMap>,
+
+    /// Same as '--translate-uid', but for GIDs.
+    #[arg(long, conflicts_with = "posix_acl")]
+    translate_gid: Vec<soft_idmap::cmdline::IdMap>,
 
     /// Preserve O_NOATIME behavior, otherwise automatically clean up O_NOATIME flag to prevent
     /// potential permission errors when running in unprivileged mode (e.g., when accessing files
@@ -768,6 +807,8 @@ fn main() {
         migration_verify_handles: opt.migration_verify_handles,
         migration_confirm_paths: opt.migration_confirm_paths,
         migration_mode: opt.migration_mode,
+        uid_map: Some(opt.translate_uid),
+        gid_map: Some(opt.translate_gid),
         ..Default::default()
     };
 

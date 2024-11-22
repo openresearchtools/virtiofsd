@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 use std::convert::TryFrom;
-use std::mem;
+use std::io;
 
 use crate::macros::enum_value;
+use crate::soft_idmap::{GuestGid, GuestUid, HostGid, HostUid};
 use bitflags::bitflags;
 use vm_memory::ByteValued;
 
@@ -594,23 +595,49 @@ pub struct Attr {
     pub ctimensec: u32,
     pub mode: u32,
     pub nlink: u32,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: GuestUid,
+    pub gid: GuestGid,
     pub rdev: u32,
     pub blksize: u32,
     pub flags: u32,
 }
 unsafe impl ByteValued for Attr {}
 
-impl From<libc::stat64> for Attr {
-    fn from(st: libc::stat64) -> Attr {
-        Attr::with_flags(st, 0)
-    }
-}
-
 impl Attr {
-    pub fn with_flags(st: libc::stat64, flags: u32) -> Attr {
-        Attr {
+    /**
+     * Turn a `stat64` result into its FUSE representation (`Attr`).
+     *
+     * Maps UID and GID from host to guest according to the mappings provided.
+     */
+    pub fn try_from_stat64<
+        UidMap: FnOnce(HostUid) -> io::Result<GuestUid>,
+        GidMap: FnOnce(HostGid) -> io::Result<GuestGid>,
+    >(
+        st: libc::stat64,
+        uid_map: UidMap,
+        gid_map: GidMap,
+    ) -> io::Result<Attr> {
+        Attr::try_with_flags(st, 0, uid_map, gid_map)
+    }
+
+    /**
+     * Turn a `stat64` result into its FUSE representation (`Attr`), including `flags`.
+     *
+     * Maps UID and GID from host to guest according to the mappings provided.
+     */
+    pub fn try_with_flags<
+        UidMap: FnOnce(HostUid) -> io::Result<GuestUid>,
+        GidMap: FnOnce(HostGid) -> io::Result<GuestGid>,
+    >(
+        st: libc::stat64,
+        flags: u32,
+        uid_map: UidMap,
+        gid_map: GidMap,
+    ) -> io::Result<Attr> {
+        let uid = uid_map(HostUid::from(st.st_uid))?;
+        let gid = gid_map(HostGid::from(st.st_gid))?;
+
+        Ok(Attr {
             ino: st.st_ino,
             size: st.st_size as u64,
             blocks: st.st_blocks as u64,
@@ -622,12 +649,12 @@ impl Attr {
             ctimensec: st.st_ctime_nsec as u32,
             mode: st.st_mode,
             nlink: st.st_nlink as u32,
-            uid: st.st_uid,
-            gid: st.st_gid,
+            uid,
+            gid,
             rdev: st.st_rdev as u32,
             blksize: st.st_blksize as u32,
             flags,
-        }
+        })
     }
 }
 
@@ -852,29 +879,11 @@ pub struct SetattrIn {
     pub ctimensec: u32,
     pub mode: u32,
     pub unused4: u32,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: GuestUid,
+    pub gid: GuestGid,
     pub unused5: u32,
 }
 unsafe impl ByteValued for SetattrIn {}
-
-impl From<SetattrIn> for libc::stat64 {
-    fn from(sai: SetattrIn) -> libc::stat64 {
-        let mut out: libc::stat64 = unsafe { mem::zeroed() };
-        out.st_mode = sai.mode;
-        out.st_uid = sai.uid;
-        out.st_gid = sai.gid;
-        out.st_size = sai.size as i64;
-        out.st_atime = sai.atime as i64;
-        out.st_mtime = sai.mtime as i64;
-        out.st_ctime = sai.ctime as i64;
-        out.st_atime_nsec = sai.atimensec.into();
-        out.st_mtime_nsec = sai.mtimensec.into();
-        out.st_ctime_nsec = sai.ctimensec.into();
-
-        out
-    }
-}
 
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -1165,8 +1174,8 @@ pub struct InHeader {
     pub opcode: u32,
     pub unique: u64,
     pub nodeid: u64,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: GuestUid,
+    pub gid: GuestGid,
     pub pid: u32,
     pub total_extlen: u16, // length of extensions in 8-byte units
     pub padding: u16,
@@ -1418,7 +1427,7 @@ unsafe impl ByteValued for SecctxHeader {}
 #[derive(Debug, Default, Copy, Clone)]
 pub struct SuppGroups {
     pub nr_groups: u32,
-    // uint32_t	groups[];
+    // groups: [GuestGid];
 }
 
 unsafe impl ByteValued for SuppGroups {}

@@ -2,17 +2,18 @@
 
 use crate::oslib;
 use crate::passthrough::util::einval;
+use crate::soft_idmap::{HostGid, HostUid, Id};
 use std::io;
 
 pub struct UnixCredentials {
-    uid: libc::uid_t,
-    gid: libc::gid_t,
-    sup_gid: Option<u32>,
+    uid: HostUid,
+    gid: HostGid,
+    sup_gid: Option<HostGid>,
     keep_capability: bool,
 }
 
 impl UnixCredentials {
-    pub fn new(uid: libc::uid_t, gid: libc::gid_t) -> Self {
+    pub fn new(uid: HostUid, gid: HostGid) -> Self {
         UnixCredentials {
             uid,
             gid,
@@ -24,7 +25,7 @@ impl UnixCredentials {
     /// Set a supplementary group. Set `supported_extension` to `false` to signal that a
     /// supplementary group maybe required, but the guest was not able to tell us which,
     /// so we have to rely on keeping the DAC_OVERRIDE capability.
-    pub fn supplementary_gid(self, supported_extension: bool, sup_gid: Option<u32>) -> Self {
+    pub fn supplementary_gid(self, supported_extension: bool, sup_gid: Option<HostGid>) -> Self {
         UnixCredentials {
             uid: self.uid,
             gid: self.gid,
@@ -36,8 +37,14 @@ impl UnixCredentials {
     /// Changes the effective uid/gid of the current thread to `val`.  Changes
     /// the thread's credentials back to root when the returned struct is dropped.
     pub fn set(self) -> io::Result<Option<UnixCredentialsGuard>> {
-        let change_uid = self.uid != 0;
-        let change_gid = self.gid != 0;
+        // Safe: Always succesful
+        let current_uid = HostUid::from(unsafe { libc::geteuid() });
+        let current_gid = HostGid::from(unsafe { libc::getegid() });
+
+        // Not to change UID/GID when they’re 0 (root) is legacy behavior that we’re afraid to
+        // change
+        let change_uid = !self.uid.is_root() && self.uid != current_uid;
+        let change_gid = !self.gid.is_root() && self.gid != current_gid;
 
         // We have to change the gid before we change the uid because if we
         // change the uid first then we lose the capability to change the gid.
@@ -71,30 +78,30 @@ impl UnixCredentials {
         }
 
         Ok(Some(UnixCredentialsGuard {
-            reset_uid: change_uid,
-            reset_gid: change_gid,
+            reset_uid: change_uid.then_some(current_uid),
+            reset_gid: change_gid.then_some(current_gid),
             drop_sup_gid: self.sup_gid.is_some(),
         }))
     }
 }
 
 pub struct UnixCredentialsGuard {
-    reset_uid: bool,
-    reset_gid: bool,
+    reset_uid: Option<HostUid>,
+    reset_gid: Option<HostGid>,
     drop_sup_gid: bool,
 }
 
 impl Drop for UnixCredentialsGuard {
     fn drop(&mut self) {
-        if self.reset_uid {
-            oslib::seteffuid(0).unwrap_or_else(|e| {
-                error!("failed to change uid back to root: {e}");
+        if let Some(uid) = self.reset_uid {
+            oslib::seteffuid(uid).unwrap_or_else(|e| {
+                error!("failed to change uid back to {uid}: {e}");
             });
         }
 
-        if self.reset_gid {
-            oslib::seteffgid(0).unwrap_or_else(|e| {
-                error!("failed to change gid back to root: {e}");
+        if let Some(gid) = self.reset_gid {
+            oslib::seteffgid(gid).unwrap_or_else(|e| {
+                error!("failed to change gid back to {gid}: {e}");
             });
         }
 

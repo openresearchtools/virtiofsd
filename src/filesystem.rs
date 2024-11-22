@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{io, mem};
 
+use crate::soft_idmap::{GuestGid, GuestUid};
 use crate::{fuse, oslib};
 
 pub use fuse::{FsOptions, OpenOptions, RemovemappingOne, SetattrValid, SetxattrFlags, ROOT_ID};
@@ -31,10 +32,7 @@ pub struct Entry {
     /// Inode attributes. Even if `attr_timeout` is zero, `attr` must be correct. For example, for
     /// `open()`, FUSE uses `attr.st_size` from `lookup()` to determine how many bytes to request.
     /// If this value is not correct, incorrect data will be returned.
-    pub attr: libc::stat64,
-
-    /// Flags for `fuse::Attr.flags`.
-    pub attr_flags: u32,
+    pub attr: fuse::Attr,
 
     /// How long the values in `attr` should be considered valid. If the attributes of the `Entry`
     /// are only modified by the FUSE client, then this should be set to a very large value.
@@ -55,7 +53,7 @@ impl From<Entry> for fuse::EntryOut {
             attr_valid: entry.attr_timeout.as_secs(),
             entry_valid_nsec: entry.entry_timeout.subsec_nanos(),
             attr_valid_nsec: entry.attr_timeout.subsec_nanos(),
-            attr: fuse::Attr::with_flags(entry.attr, entry.attr_flags),
+            attr: entry.attr,
         }
     }
 }
@@ -172,10 +170,10 @@ impl<W: ZeroCopyWriter> ZeroCopyWriter for &mut W {
 #[derive(Clone, Copy, Debug)]
 pub struct Context {
     /// The user ID of the calling process.
-    pub uid: libc::uid_t,
+    pub uid: GuestUid,
 
     /// The group ID of the calling process.
-    pub gid: libc::gid_t,
+    pub gid: GuestGid,
 
     /// The thread group ID of the calling process.
     pub pid: libc::pid_t,
@@ -195,7 +193,7 @@ impl From<fuse::InHeader> for Context {
 #[derive(Clone, Default, Debug)]
 pub struct Extensions {
     pub secctx: Option<SecContext>,
-    pub sup_gid: Option<u32>,
+    pub sup_gid: Option<GuestGid>,
 }
 
 /// Additional security context associated with requests.
@@ -312,7 +310,7 @@ pub trait FileSystem {
         ctx: Context,
         inode: Self::Inode,
         handle: Option<Self::Handle>,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(fuse::Attr, Duration)> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
@@ -337,10 +335,10 @@ pub trait FileSystem {
         &self,
         ctx: Context,
         inode: Self::Inode,
-        attr: libc::stat64,
+        attr: fuse::SetattrIn,
         handle: Option<Self::Handle>,
         valid: SetattrValid,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(fuse::Attr, Duration)> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
