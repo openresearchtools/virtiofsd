@@ -15,7 +15,7 @@ use std::convert::{TryFrom, TryInto};
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::mem::{size_of, MaybeUninit};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1058,17 +1058,17 @@ impl<F: FileSystem + Sync> Server<F> {
         let parent = in_header.nodeid.into();
         let name = dir_entry.name.to_bytes();
         let entry = if name == CURRENT_DIR_CSTR || name == PARENT_DIR_CSTR {
-            // Don't do lookups on the current directory or the parent directory. Safe because
-            // this only contains integer fields and any value is valid.
-            let mut attr = unsafe { MaybeUninit::<Attr>::zeroed().assume_init() };
-            attr.ino = dir_entry.ino;
-            attr.mode = dir_entry.type_ << 12;
-
             // We use 0 for the inode value to indicate a negative entry.
             Entry {
                 inode: 0,
                 generation: 0,
-                attr,
+                // Don't do lookups on the current directory or the parent directory, i.e. leave
+                // most fields 0.
+                attr: Attr {
+                    ino: dir_entry.ino,
+                    mode: dir_entry.type_ << 12,
+                    ..Default::default()
+                },
                 attr_timeout: Duration::from_secs(0),
                 entry_timeout: Duration::from_secs(0),
             }
