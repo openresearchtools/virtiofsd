@@ -129,7 +129,7 @@ struct Opt {
     #[arg(long = "socket-group", conflicts_with_all = &["fd", "print_capabilities"])]
     socket_group: Option<String>,
 
-    /// File descriptor for the listening socket
+    /// File descriptor for the listening (not yet connected) socket
     #[arg(long, required_unless_present_any = &["socket", "socket_path", "print_capabilities"], conflicts_with_all = &["socket_path", "socket"])]
     fd: Option<RawFd>,
 
