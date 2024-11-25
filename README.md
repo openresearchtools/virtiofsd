@@ -186,7 +186,7 @@ vhost-user socket path.
 ```shell
 --fd <fd>
 ```
-File descriptor for the listening socket.
+File descriptor for the listening (not yet connected) socket.
 
 ```shell
 --log-level <log-level>
