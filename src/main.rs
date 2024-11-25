@@ -97,7 +97,9 @@ fn parse_tag(tag: &str) -> Result<String> {
     name = "virtiofsd",
     about = "Launch a virtiofsd backend.",
     version,
-    args_override_self = true
+    args_override_self = true,
+    arg_required_else_help = true,
+    override_usage = "virtiofsd --shared-dir <SHARED_DIR> --socket-path <SOCKET_PATH> [OPTIONS]"
 )]
 struct Opt {
     /// Shared directory path
