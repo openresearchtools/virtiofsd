@@ -261,6 +261,8 @@ Default: auto.
 ```
 
 For shared directories with `--cache={metadata, never}`, allow files contained in the shared directory to be `mmap`'d.
+Regardless of the selected cache policy, this option should only be enabled when the file system has exclusive access
+to the directory.
 
 ```shell
 --inode-file-handles=<inode-file-handles>
