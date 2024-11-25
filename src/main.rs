@@ -187,6 +187,9 @@ struct Opt {
     #[arg(long, default_value = "auto")]
     cache: CachePolicy,
 
+    /// When used with --cache={metadata, never} will allow shared files to be mmap'd.
+    /// Regardless of the selected cache policy, this option should only be enabled
+    /// when the file system has exclusive access to the directory.
     #[arg(long)]
     allow_mmap: bool,
 
