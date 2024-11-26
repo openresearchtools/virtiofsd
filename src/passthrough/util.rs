@@ -1,7 +1,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
-use crate::util::{other_io_error, ErrorContext};
+use crate::util::{other_io_error, ErrorContext, ResultErrorContext};
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -26,6 +26,14 @@ pub fn openat(dir_fd: &impl AsRawFd, path: &str, flags: libc::c_int) -> io::Resu
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Same as `openat()`, but produces more verbose errors.
+///
+/// Do not use this for operations where the error is returned to the guest, as the raw OS error
+/// value will be clobbered.
+pub fn openat_verbose(dir_fd: &impl AsRawFd, path: &str, flags: libc::c_int) -> io::Result<File> {
+    openat(dir_fd, path, flags).err_context(|| path)
 }
 
 /// Open `/proc/self/fd/{fd}` with the given flags to effectively duplicate the given `fd` with new

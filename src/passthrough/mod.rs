@@ -22,7 +22,9 @@ use crate::passthrough::device_state::preserialization::{
 use crate::passthrough::inode_store::{
     Inode, InodeData, InodeFile, InodeIds, InodeStore, StrongInodeReference,
 };
-use crate::passthrough::util::{ebadf, is_safe_inode, openat, reopen_fd_through_proc};
+use crate::passthrough::util::{
+    ebadf, is_safe_inode, openat, openat_verbose, reopen_fd_through_proc,
+};
 use crate::read_dir::ReadDir;
 use crate::soft_idmap::{self, GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
 use crate::util::{other_io_error, ResultErrorContext};
@@ -485,14 +487,14 @@ impl PassthroughFs {
         let proc_self_fd = if let Some(fd) = cfg.proc_sfd_rawfd.take() {
             fd
         } else {
-            openat(
+            openat_verbose(
                 &libc::AT_FDCWD,
                 "/proc/self/fd",
                 libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )?
         };
 
-        let root_fd = openat(
+        let root_fd = openat_verbose(
             &libc::AT_FDCWD,
             "/",
             libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
@@ -506,7 +508,7 @@ impl PassthroughFs {
             let mountinfo_fd = if let Some(fd) = cfg.proc_mountinfo_rawfd.take() {
                 fd
             } else {
-                openat(
+                openat_verbose(
                     &libc::AT_FDCWD,
                     "/proc/self/mountinfo",
                     libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
@@ -736,7 +738,7 @@ impl PassthroughFs {
         // (Note that we pass through all I/O errors to the caller, because `PassthroughFs::init()`
         // will do these calls (`openat()`, `stat()`, etc.) anyway, so if they do not work now,
         // they probably are not going to work later either.  Better to report errors early then.)
-        let root_dir = openat(
+        let root_dir = openat_verbose(
             &libc::AT_FDCWD,
             self.cfg.root_dir.as_str(),
             libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
