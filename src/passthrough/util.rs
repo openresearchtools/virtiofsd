@@ -24,7 +24,7 @@ pub fn openat(dir_fd: &impl AsRawFd, path: &str, flags: libc::c_int) -> io::Resu
         // Safe because we just opened this fd
         Ok(unsafe { File::from_raw_fd(fd) })
     } else {
-        Err(io::Error::last_os_error().context(path))
+        Err(io::Error::last_os_error())
     }
 }
 
