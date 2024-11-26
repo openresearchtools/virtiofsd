@@ -67,6 +67,10 @@ pub fn einval() -> io::Error {
     io::Error::from_raw_os_error(libc::EINVAL)
 }
 
+pub fn erofs() -> io::Error {
+    io::Error::from_raw_os_error(libc::EROFS)
+}
+
 /**
  * Errors that `get_path_by_fd()` can encounter.
  *

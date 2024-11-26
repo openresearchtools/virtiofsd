@@ -156,6 +156,13 @@ By default virtiofsd will implicitly clean up `O_NOATIME` to prevent potential
 permission errors. The option `--preserve-noatime` can be used to override this
 behavior and preserve the `O_NOATIME` flag specified by the client.
 
+```shell
+--readonly
+```
+Prevent write accesses from the guest.  Note that this does not make the
+underlying shared directory an actual read-only mount, so e.g. the access time
+is still updated on accesses.
+
 #### Options
 ```shell
 --shared-dir <shared-dir>
@@ -557,8 +564,14 @@ We could also select `--sandbox none` instead of `--sandbox chroot`.
 
 ## FAQ
 - How to read-only-share a directory that cannot be modified within the guest?
-To accomplish this you need to export a read-only mount point, for instance,
-exporting `share`:
+You can either use virtiofsd’s `--readonly` switch to prevent write accesses
+from the guest, for instance, exporting `share`
+
+```shell
+virtiofsd --shared-dir share --readonly ...
+```
+
+Or export a read-only mount point:
 
 ```shell
 mkdir ro-share
