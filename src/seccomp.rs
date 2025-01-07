@@ -186,6 +186,9 @@ pub fn enable_seccomp(action: SeccompAction, allow_remote_logging: bool) -> Resu
     allow_syscall!(ctx, libc::SYS_syncfs);
     #[cfg(target_arch = "x86_64")]
     allow_syscall!(ctx, libc::SYS_time); // Rarely needed, except on static builds
+    allow_syscall!(ctx, libc::SYS_tkill); // Deprecated in favour of tgkill, but older OSes may
+                                          // still be using it, and we should avoid crashing on
+                                          // those cases.
     allow_syscall!(ctx, libc::SYS_tgkill);
     allow_syscall!(ctx, libc::SYS_umask);
     #[cfg(any(
