@@ -10,7 +10,9 @@ clippy:
     - apk add musl-dev
     - rustup component add clippy
   script:
-    - cargo clippy --verbose -- -Dwarnings
+    # clippy seems to have a bug where it is suggesting using C string literals
+    # despite it not being possible in the project's edition (2018 in our case).
+    - cargo clippy --verbose -- -Dwarnings -Aclippy::manual-c-str-literals
 
 fmt:
   before_script:
