@@ -254,7 +254,7 @@ struct Opt {
     #[arg(short = 'f')]
     compat_foreground: bool,
 
-    /// Enable security label support. Expects SELinux xattr on file creation
+    /// Enable security label support (implies --xattr). Expects SELinux xattr on file creation
     /// from client and stores it in the newly created file.
     #[arg(long = "security-label")]
     security_label: bool,
@@ -684,7 +684,7 @@ fn main() {
     }
 
     let xattrmap = opt.xattrmap.clone();
-    let xattr = xattrmap.is_some() || opt.posix_acl || opt.xattr;
+    let xattr = xattrmap.is_some() || opt.posix_acl || opt.security_label || opt.xattr;
     let thread_pool_size = opt.thread_pool_size;
     let readdirplus = match opt.cache {
         CachePolicy::Never => false,

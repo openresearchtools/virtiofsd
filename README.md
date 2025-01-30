@@ -145,7 +145,7 @@ Enable support for posix ACLs (implies --xattr).
 ```shell
 --security-label
 ```
-Enable support for security label (SELinux).
+Enable support for security label (SELinux). Implies --xattr.
 
 ```shell
 --preserve-noatime
