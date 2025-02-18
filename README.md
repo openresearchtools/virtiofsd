@@ -534,6 +534,13 @@ mapped in as themselves with the help of the `newuidmap(1)` and `newgidmap(1)` h
 host$ podman unshare -- virtiofsd --socket-path=/tmp/vfsd.sock --shared-dir /mnt \
         --announce-submounts --sandbox chroot &
 ```
+Alternatively we can also achieve the same effect without Podman by relying on `unshare(1)` included in
+`util-linux` which has the benefit that it should already be installed for most users. Use it like so:
+
+```shell
+host$ unshare -r --map-auto -- virtiofsd --socket-path=/tmp/vfsd.sock --shared-dir /mnt \
+        --announce-submounts --sandbox chroot &
+```
 
 Using `lxc-usernsexec(1)`, we could leave the invoking user outside the mapping, having
 the root user inside the user namespace mapped to the user and group 100000:
