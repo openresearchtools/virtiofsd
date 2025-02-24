@@ -349,10 +349,10 @@ struct Opt {
     /// different ways:
     ///
     /// - abort: Whenever any error occurs, return a hard error to the vhost-user front-end (e.g.
-    ///          QEMU), aborting migration.
+    ///   QEMU), aborting migration.
     ///
     /// - guest-error: Let migration finish, but the guest will be unable to access any of the
-    ///                affected inodes, receiving only errors.
+    ///   affected inodes, receiving only errors.
     ///
     /// This parameter is ignored on the source side.
     #[arg(long = "migration-on-error", default_value = "abort")]
