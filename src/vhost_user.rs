@@ -459,9 +459,9 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
     }
 
     fn features(&self) -> u64 {
-        1 << VIRTIO_F_VERSION_1
-            | 1 << VIRTIO_RING_F_INDIRECT_DESC
-            | 1 << VIRTIO_RING_F_EVENT_IDX
+        (1 << VIRTIO_F_VERSION_1)
+            | (1 << VIRTIO_RING_F_INDIRECT_DESC)
+            | (1 << VIRTIO_RING_F_EVENT_IDX)
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
             | VhostUserVirtioFeatures::LOG_ALL.bits()
     }
