@@ -7,9 +7,8 @@
  * following submodules:
  * - serialized: Serialized data structures
  * - preserialization: Structures and functionality for preparing for migration (serialization),
- *                     i.e. define and construct the precursors to the eventually serialized
- *                     information that are stored alongside the associated inodes and handles they
- *                     describe
+ *   i.e. define and construct the precursors to the eventually serialized information that are
+ *   stored alongside the associated inodes and handles they describe
  * - serialization: Functionality for serializing
  * - deserialization: Functionality for deserializing
  */

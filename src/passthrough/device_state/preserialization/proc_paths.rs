@@ -224,11 +224,10 @@ impl<'a> Walker<'a> {
      *
      * In case of error, differentiate between:
      * - `Fallback(err)`: We failed to construct inode migration info for some number of inodes.
-     *                    However, we expect a different, more exhaustive method to find inodes’
-     *                    paths (e.g. DFS through the shared directory) can succeed.  In case of
-     *                    `Mode::Constructor`, the caller must fall back to such a different
-     *                    preserialization module (i.e. [`super::find_paths`]).  In other modes,
-     *                    this should be treated the same as `Unrecoverable`.
+     *   However, we expect a different, more exhaustive method to find inodes’ paths (e.g. DFS
+     *   through the shared directory) can succeed.  In case of `Mode::Constructor`, the caller
+     *   must fall back to such a different preserialization module (i.e. [`super::find_paths`]).
+     *   In other modes, this should be treated the same as `Unrecoverable`.
      * - `Unrecoverable(err)`: Hard error, falling back to a different method is not advised.
      */
     fn run(self) -> Result<(), WrappedError> {

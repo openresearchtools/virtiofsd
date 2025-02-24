@@ -634,16 +634,16 @@ impl PassthroughFs {
     /// These are the possible return values:
     /// - `Ok(Some(_))`: Success, caller should use this file handle.
     /// - `Ok(None)`: No error, but no file handle is available.  The caller should fall back to
-    ///               using an `O_PATH` FD.
+    ///   using an `O_PATH` FD.
     /// - `Err(_)`: An error occurred, the caller should return this to the guest.
     ///
     /// This function takes the chosen `self.cfg.inode_file_handles` mode into account:
     /// - `Never`: Always return `Ok(None)`.
     /// - `Prefer`: Return `Ok(None)` when file handles are not supported by this filesystem.
-    ///             Otherwise, return either `Ok(Some(_))` or `Err(_)`, depending on whether a file
-    ///             handle could be generated or not.
+    ///   Otherwise, return either `Ok(Some(_))` or `Err(_)`, depending on whether a file handle
+    ///   could be generated or not.
     /// - `Mandatory`: Never return `Ok(None)`.  When the filesystem does not support file handles,
-    ///                return an `Err(_)`.
+    ///   return an `Err(_)`.
     ///
     /// When the filesystem does not support file handles, this is logged (as a warning in
     /// `Prefer` mode, and as an error in `Mandatory` mode) one time per filesystem.
