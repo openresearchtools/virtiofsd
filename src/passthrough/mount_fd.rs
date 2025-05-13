@@ -191,7 +191,7 @@ impl MPRError {
     /// Add a prefix to the description
     #[must_use]
     pub fn prefix(self, s: String) -> Self {
-        let new_desc = format!("{}: {}", s, self.description);
+        let new_desc = format!("{s}: {}", self.description);
         self.set_desc(new_desc)
     }
 
@@ -319,8 +319,8 @@ impl MountFds {
                 return Err(self
                     .error_for(mount_id, io::Error::from_raw_os_error(libc::EIO))
                     .set_desc(format!(
-                        "Mount point's ({}) mount ID ({}) does not match expected value ({})",
-                        mount_point, stx.mnt_id, mount_id
+                        "Mount point's ({mount_point}) mount ID ({}) does not match expected value ({mount_id})",
+                        stx.mnt_id
                     )));
             }
 

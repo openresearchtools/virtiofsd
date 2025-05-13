@@ -67,9 +67,8 @@ impl InodeMigrationInfo {
             MigrationMode::FileHandles => {
                 let handle = file_or_handle.try_into().err_context(|| {
                     format!(
-                        "(inode {})/{:?}: Failed to generate file handle",
+                        "(inode {})/{filename:?}: Failed to generate file handle",
                         parent_ref.get().inode,
-                        filename,
                     )
                 })?;
                 file_handles::FileHandle::new(handle).into()
