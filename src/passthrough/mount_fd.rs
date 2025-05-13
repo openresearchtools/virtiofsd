@@ -234,18 +234,16 @@ impl std::fmt::Display for MPRError {
         match (self.fs_mount_id, &self.fs_mount_root) {
             (None, None) => write!(f, "{}", self.description),
 
-            (Some(id), None) => write!(f, "Filesystem with mount ID {}: {}", id, self.description),
+            (Some(id), None) => write!(f, "Filesystem with mount ID {id}: {}", self.description),
 
-            (None, Some(root)) => write!(
-                f,
-                "Filesystem mounted on \"{}\": {}",
-                root, self.description
-            ),
+            (None, Some(root)) => {
+                write!(f, "Filesystem mounted on \"{root}\": {}", self.description)
+            }
 
             (Some(id), Some(root)) => write!(
                 f,
-                "Filesystem mounted on \"{}\" (mount ID: {}): {}",
-                root, id, self.description
+                "Filesystem mounted on \"{root}\" (mount ID: {id}): {}",
+                self.description
             ),
         }
     }

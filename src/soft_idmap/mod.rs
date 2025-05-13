@@ -218,15 +218,14 @@ where
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             MapEntry::Squash { from, to } => {
-                write!(f, "squash [{}, {}) to {}", from.start, from.end, to)
+                write!(f, "squash [{}, {}) to {to}", from.start, from.end)
             }
             MapEntry::Range { from, to_base } => {
                 write!(
                     f,
-                    "map [{}, {}) to [{}, {})",
+                    "map [{}, {}) to [{to_base}, {})",
                     from.start,
                     from.end,
-                    to_base,
                     *to_base + (from.end - from.start)
                 )
             }
