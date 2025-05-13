@@ -110,7 +110,7 @@ pub fn wait_for_child(pid: i32) -> ! {
     capng::clear(capng::Set::BOTH);
     if let Err(e) = capng::apply(capng::Set::BOTH) {
         // Don't exit the process here since we already have a child.
-        error!("warning: can't apply the parent capabilities: {}", e);
+        error!("warning: can't apply the parent capabilities: {e}");
     }
 
     let mut status = 0;
@@ -124,10 +124,10 @@ pub fn wait_for_child(pid: i32) -> ! {
         libc::WEXITSTATUS(status)
     } else if libc::WIFSIGNALED(status) {
         let signal = libc::WTERMSIG(status);
-        error!("Child process terminated by signal {}", signal);
+        error!("Child process terminated by signal {signal}");
         -signal
     } else {
-        error!("Unexpected waitpid status: {:#X}", status);
+        error!("Unexpected waitpid status: {status:#X}");
         libc::EXIT_FAILURE
     };
 

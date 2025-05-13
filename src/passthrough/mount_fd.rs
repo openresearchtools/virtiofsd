@@ -357,8 +357,7 @@ impl MountFds {
                 mount_fd
             } else {
                 debug!(
-                    "Creating MountFd: mount_id={}, mount_fd={}",
-                    mount_id,
+                    "Creating MountFd: mount_id={mount_id}, mount_fd={}",
                     file.as_raw_fd(),
                 );
                 let mount_fd = Arc::new(MountFd {

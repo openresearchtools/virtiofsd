@@ -447,7 +447,7 @@ impl Sandbox {
                     // other end of the pipe.
                     drop(x_reader);
                     drop(y_writer);
-                    error!("sandbox: couldn't setup id mappings: {}", error);
+                    error!("sandbox: couldn't setup id mappings: {error}");
                     process::exit(1);
                 };
             }
@@ -489,11 +489,11 @@ impl Sandbox {
             // Set the process inside the user namespace as root
             let mut ret = unsafe { libc::setresuid(0, 0, 0) };
             if ret != 0 {
-                warn!("Couldn't set the process uid as root: {}", ret);
+                warn!("Couldn't set the process uid as root: {ret}");
             }
             ret = unsafe { libc::setresgid(0, 0, 0) };
             if ret != 0 {
-                warn!("Couldn't set the process gid as root: {}", ret);
+                warn!("Couldn't set the process gid as root: {ret}");
             }
 
             let child = util::sfork().map_err(Error::Fork)?;

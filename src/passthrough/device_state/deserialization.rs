@@ -404,7 +404,7 @@ impl serialized::Inode {
         match fs.cfg.migration_on_error {
             MigrationOnError::Abort => Err(err.context(format!("Inode {}", self.id))),
             MigrationOnError::GuestError => {
-                warn!("Invalid inode {} indexed: {}", self.id, err);
+                warn!("Invalid inode {} indexed: {err}", self.id);
                 Ok(InodeData {
                     inode: self.id,
                     file_or_handle: FileOrHandle::Invalid(Arc::new(err)),
@@ -511,7 +511,7 @@ impl serialized::Handle {
                         match fs.cfg.migration_on_error {
                             MigrationOnError::Abort => return Err(err),
                             MigrationOnError::GuestError => {
-                                warn!("Invalid handle {} is open in guest: {}", self.id, err);
+                                warn!("Invalid handle {} is open in guest: {err}", self.id);
                                 HandleDataFile::Invalid(Arc::new(err))
                             }
                         }

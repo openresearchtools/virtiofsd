@@ -69,10 +69,9 @@ impl<'a> Constructor<'a> {
 
             if let Err(err) = self.set_migration_info(&inode_data) {
                 error!(
-                    "Inode {} ({}): {}",
+                    "Inode {} ({}): {err}",
                     inode_data.inode,
                     inode_data.identify(&self.fs.proc_self_fd),
-                    err
                 );
             }
         }

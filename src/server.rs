@@ -112,8 +112,8 @@ impl<F: FileSystem + Sync> Server<F> {
 
         if let Ok(opcode) = Opcode::try_from(in_header.opcode) {
             debug!(
-                "Received request: opcode={:?} ({}), inode={}, unique={}, pid={}",
-                opcode, in_header.opcode, in_header.nodeid, in_header.unique, in_header.pid
+                "Received request: opcode={opcode:?} ({}), inode={}, unique={}, pid={}",
+                in_header.opcode, in_header.nodeid, in_header.unique, in_header.pid
             );
             match opcode {
                 Opcode::Lookup => self.lookup(in_header, r, w),
@@ -598,7 +598,7 @@ impl<F: FileSystem + Sync> Server<F> {
                     unique: in_header.unique,
                 };
 
-                debug!("Replying OK, header: {:?}", out);
+                debug!("Replying OK, header: {out:?}");
                 w.write_all(out.as_slice()).map_err(Error::EncodeMessage)?;
                 Ok(out.len as usize)
             }
@@ -889,7 +889,7 @@ impl<F: FileSystem + Sync> Server<F> {
         };
 
         if major < KERNEL_VERSION {
-            error!("Unsupported fuse protocol version: {}.{}", major, minor);
+            error!("Unsupported fuse protocol version: {major}.{minor}");
             return reply_error(
                 io::Error::from_raw_os_error(libc::EPROTO),
                 in_header.unique,
@@ -909,10 +909,7 @@ impl<F: FileSystem + Sync> Server<F> {
         }
 
         if minor < MIN_KERNEL_MINOR_VERSION {
-            error!(
-                "Unsupported fuse protocol minor version: {}.{}",
-                major, minor
-            );
+            error!("Unsupported fuse protocol minor version: {major}.{minor}");
             return reply_error(
                 io::Error::from_raw_os_error(libc::EPROTO),
                 in_header.unique,
@@ -1491,7 +1488,7 @@ fn reply_readdir(len: usize, unique: u64, mut w: Writer) -> Result<usize> {
         unique,
     };
 
-    debug!("Replying OK, header: {:?}", out);
+    debug!("Replying OK, header: {out:?}");
     w.write_all(out.as_slice()).map_err(Error::EncodeMessage)?;
     w.flush().map_err(Error::FlushMessage)?;
     Ok(out.len as usize)
@@ -1519,7 +1516,7 @@ fn reply_ok<T: ByteValued>(
         unique,
     };
 
-    debug!("Replying OK, header: {:?}", header);
+    debug!("Replying OK, header: {header:?}");
 
     w.write_all(header.as_slice())
         .map_err(Error::EncodeMessage)?;
@@ -1743,7 +1740,7 @@ fn get_extensions(options: FsOptions, skip: usize, request_bytes: &[u8]) -> Resu
 
                 secctx_received = true;
                 extensions.secctx = parse_security_context(nr_secctx, current_extension_bytes)?;
-                debug!("Extension received: {} SecCtx", nr_secctx);
+                debug!("Extension received: {nr_secctx} SecCtx");
             }
             ExtType::SupGroups => {
                 if !options.contains(FsOptions::CREATE_SUPP_GROUP) || extensions.sup_gid.is_some() {

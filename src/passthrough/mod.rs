@@ -700,12 +700,12 @@ impl PassthroughFs {
                 InodeFileHandlesMode::Never => unreachable!(),
                 InodeFileHandlesMode::Prefer => {
                     if !err.silent() {
-                        warn!("{}", err);
+                        warn!("{err}");
                     }
                 }
                 InodeFileHandlesMode::Mandatory => {
                     if !err.silent() {
-                        error!("{}", err);
+                        error!("{err}");
                     }
                     return Err(err.into_inner());
                 }
@@ -722,7 +722,7 @@ impl PassthroughFs {
         })
         .map_err(|e| {
             if !e.silent() {
-                error!("{}", e);
+                error!("{e}");
             }
             e.into_inner()
         })
@@ -753,12 +753,12 @@ impl PassthroughFs {
                 Err(e) => match self.cfg.inode_file_handles {
                     InodeFileHandlesMode::Never => unreachable!(),
                     InodeFileHandlesMode::Prefer => {
-                        warn!("Failed to open file handle for the root node: {}", e);
+                        warn!("Failed to open file handle for the root node: {e}");
                         warn!("File handles do not appear safe to use, disabling file handles altogether");
                         self.cfg.inode_file_handles = InodeFileHandlesMode::Never;
                     }
                     InodeFileHandlesMode::Mandatory => {
-                        error!("Failed to open file handle for the root node: {}", e);
+                        error!("Failed to open file handle for the root node: {e}");
                         error!("Refusing to use (mandatory) file handles, as they do not appear safe to use");
                         return Err(e);
                     }
@@ -2650,7 +2650,7 @@ impl FileSystem for PassthroughFs {
 
         let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NOFOLLOW)?;
         let raw_fd = file.as_raw_fd();
-        debug!("syncfs: inode={}, mount_fd={}", inode, raw_fd);
+        debug!("syncfs: inode={inode}, mount_fd={raw_fd}");
         let ret = unsafe { libc::syncfs(raw_fd) };
         if ret != 0 {
             // Thread-safe, because errno is stored in thread-local storage.

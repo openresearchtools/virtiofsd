@@ -712,7 +712,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> Drop
             .kill_evt
             .write(1);
         if let Err(e) = result {
-            error!("Error shutting down worker thread: {:?}", e)
+            error!("Error shutting down worker thread: {e:?}")
         }
     }
 }
