@@ -163,6 +163,8 @@ pub fn add_cap_to_eff(cap_name: &str) -> capng::Result<()> {
 /// Same as `io::Error::other()`, but the respective io_error_other feature has only been
 /// stabilized in Rust 1.74.0, which is too new for our intended targets.
 pub fn other_io_error<E: Into<Box<dyn std::error::Error + Send + Sync>>>(err: E) -> io::Error {
+    #[allow(unknown_lints)]
+    #[allow(clippy::io_other_error)]
     io::Error::new(io::ErrorKind::Other, err)
 }
 
