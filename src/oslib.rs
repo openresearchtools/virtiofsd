@@ -286,17 +286,15 @@ mod filehandle {
             Ok(CFileHandle {
                 handle_bytes: sfh_bytes.len().try_into().map_err(|err| {
                     other_io_error(format!(
-                        "Handle size ({} bytes) too big: {}",
+                        "Handle size ({} bytes) too big: {err}",
                         sfh_bytes.len(),
-                        err
                     ))
                 })?,
                 #[allow(clippy::useless_conversion)]
                 handle_type: sfh.handle_type().try_into().map_err(|err| {
                     other_io_error(format!(
-                        "Handle type (0x{:x}) too large: {}",
+                        "Handle type (0x{:x}) too large: {err}",
                         sfh.handle_type(),
-                        err
                     ))
                 })?,
                 f_handle,

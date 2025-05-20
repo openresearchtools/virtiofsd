@@ -623,7 +623,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
         if phase != VhostTransferStatePhase::STOPPED {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("Transfer in phase {:?} is not supported", phase),
+                format!("Transfer in phase {phase:?} is not supported"),
             ));
         }
 
@@ -658,9 +658,9 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
                         server.prepare_serialization(Arc::new(AtomicBool::new(false)));
                     }
 
-                    server.serialize(file).map_err(|e| {
-                        io::Error::new(e.kind(), format!("Failed to save state: {}", e))
-                    })
+                    server
+                        .serialize(file)
+                        .map_err(|e| io::Error::new(e.kind(), format!("Failed to save state: {e}")))
                 })
             }
 
@@ -673,9 +673,9 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
                 }
 
                 thread::spawn(move || {
-                    server.deserialize_and_apply(file).map_err(|e| {
-                        io::Error::new(e.kind(), format!("Failed to load state: {}", e))
-                    })
+                    server
+                        .deserialize_and_apply(file)
+                        .map_err(|e| io::Error::new(e.kind(), format!("Failed to load state: {e}")))
                 })
             }
         };
@@ -712,7 +712,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> Drop
             .kill_evt
             .write(1);
         if let Err(e) = result {
-            error!("Error shutting down worker thread: {:?}", e)
+            error!("Error shutting down worker thread: {e:?}")
         }
     }
 }

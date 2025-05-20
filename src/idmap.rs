@@ -26,7 +26,7 @@ impl fmt::Display for IdMapError {
                 f,
                 "The map is empty or incorrect number of values are provided"
             ),
-            IdMapError::InvalidValue(err) => write!(f, "{}", err),
+            IdMapError::InvalidValue(err) => write!(f, "{err}"),
         }
     }
 }

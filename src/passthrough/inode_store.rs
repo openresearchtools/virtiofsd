@@ -206,8 +206,8 @@ impl<'a> InodeData {
                 _ => "unknown inode type",
             };
             format!(
-                "[{}; mount_id={} device_id={} inode_id={}]",
-                mode, self.ids.mnt_id, self.ids.dev, self.ids.ino,
+                "[{mode}; mount_id={} device_id={} inode_id={}]",
+                self.ids.mnt_id, self.ids.dev, self.ids.ino,
             )
         }
     }

@@ -360,11 +360,8 @@ impl serialized::Inode {
             io::Error::new(
                 err.kind(),
                 format!(
-                    "Opening {}{}{}: {}",
-                    pfd,
+                    "Opening {pfd}{}{filename}: {err}",
                     if pfd.ends_with('/') { "" } else { "/" },
-                    filename,
-                    err
                 ),
             )
         })?;
@@ -404,7 +401,7 @@ impl serialized::Inode {
         match fs.cfg.migration_on_error {
             MigrationOnError::Abort => Err(err.context(format!("Inode {}", self.id))),
             MigrationOnError::GuestError => {
-                warn!("Invalid inode {} indexed: {}", self.id, err);
+                warn!("Invalid inode {} indexed: {err}", self.id);
                 Ok(InodeData {
                     inode: self.id,
                     file_or_handle: FileOrHandle::Invalid(Arc::new(err)),
@@ -427,8 +424,8 @@ impl serialized::Inode {
         // Disregard the mount ID, this may be a different host, so the mount ID may differ
         is_fh.require_equal_without_mount_id(ref_fh).map_err(|err| {
             other_io_error(format!(
-                "Inode {} is not the same inode as in the migration source: {}",
-                self.id, err
+                "Inode {} is not the same inode as in the migration source: {err}",
+                self.id
             ))
         })
     }
@@ -498,20 +495,17 @@ impl serialized::Handle {
                         let error_msg = if let Ok(path) = inode.get_path(&fs.proc_self_fd) {
                             let p = path.as_c_str().to_string_lossy();
                             format!(
-                                "Opening inode {} ({}) as handle {}: {}",
-                                self.inode, p, self.id, err
+                                "Opening inode {} ({p}) as handle {}: {err}",
+                                self.inode, self.id
                             )
                         } else {
-                            format!(
-                                "Opening inode {} as handle {}: {}",
-                                self.inode, self.id, err
-                            )
+                            format!("Opening inode {} as handle {}: {err}", self.inode, self.id)
                         };
                         let err = io::Error::new(err.kind(), error_msg);
                         match fs.cfg.migration_on_error {
                             MigrationOnError::Abort => return Err(err),
                             MigrationOnError::GuestError => {
-                                warn!("Invalid handle {} is open in guest: {}", self.id, err);
+                                warn!("Invalid handle {} is open in guest: {err}", self.id);
                                 HandleDataFile::Invalid(Arc::new(err))
                             }
                         }

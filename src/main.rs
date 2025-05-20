@@ -514,7 +514,7 @@ fn initialize_logging(opt: &Opt) {
     if opt.syslog {
         if let Err(e) = syslog::init(syslog::Facility::LOG_USER, log_level, None) {
             set_default_logger(log_level);
-            warn!("can't enable syslog: {}", e);
+            warn!("can't enable syslog: {e}");
         }
     } else {
         set_default_logger(log_level);
@@ -530,7 +530,7 @@ fn set_signal_handlers() {
     let signals = vec![libc::SIGHUP, libc::SIGTERM];
     for s in signals {
         if let Err(e) = signal::register_signal_handler(s, handle_signal) {
-            error!("Setting signal handlers: {}", e);
+            error!("Setting signal handlers: {e}");
             process::exit(1);
         }
     }
@@ -552,14 +552,11 @@ fn parse_modcaps(
             let (action, cap_name) = modcap.split_at(1);
             let cap_name = cap_name.to_uppercase();
             if !matches!(action, "+" | "-") {
-                error!(
-                    "invalid modcap action: expecting '+'|'-' but found '{}'",
-                    action
-                );
+                error!("invalid modcap action: expecting '+'|'-' but found '{action}'");
                 process::exit(1);
             }
             if let Err(error) = capng::name_to_capability(&cap_name) {
-                error!("invalid capability '{}': {}", &cap_name, error);
+                error!("invalid capability '{cap_name}': {error}");
                 process::exit(1);
             }
 
@@ -595,10 +592,7 @@ fn drop_capabilities(inode_file_handles: InodeFileHandlesMode, modcaps: Option<S
     if inode_file_handles != InodeFileHandlesMode::Never {
         let required_cap = "DAC_READ_SEARCH".to_owned();
         if disabled_caps.contains(&required_cap) {
-            error!(
-                "can't disable {} when using --inode-file-handles={:?}",
-                &required_cap, inode_file_handles
-            );
+            error!("can't disable {required_cap} when using --inode-file-handles={inode_file_handles:?}");
             process::exit(1);
         }
         required_caps.insert(required_cap);
@@ -612,11 +606,11 @@ fn drop_capabilities(inode_file_handles: InodeFileHandlesMode, modcaps: Option<S
         capng::Type::PERMITTED | capng::Type::EFFECTIVE,
         required_caps.iter().map(String::as_str).collect(),
     ) {
-        error!("can't set up the child capabilities: {}", e);
+        error!("can't set up the child capabilities: {e}");
         process::exit(1);
     }
     if let Err(e) = capng::apply(capng::Set::BOTH) {
-        error!("can't apply the child capabilities: {}", e);
+        error!("can't apply the child capabilities: {e}");
         process::exit(1);
     }
 }
@@ -738,12 +732,12 @@ fn main() {
             let pid_file_name = socket.to_owned() + ".pid";
             let pid_file_path = Path::new(pid_file_name.as_str());
             let pid_file = write_pid_file(pid_file_path).unwrap_or_else(|error| {
-                error!("Error creating pid file '{}': {}", pid_file_name, error);
+                error!("Error creating pid file '{pid_file_name}': {error}");
                 process::exit(1);
             });
 
             let listener = Listener::new(socket, true).unwrap_or_else(|error| {
-                error!("Error creating listener: {}", error);
+                error!("Error creating listener: {error}");
                 process::exit(1);
             });
 
@@ -772,7 +766,7 @@ fn main() {
     }
 
     limits::setup_rlimit_nofile(opt.rlimit_nofile).unwrap_or_else(|error| {
-        error!("Error increasing number of open files: {}", error);
+        error!("Error increasing number of open files: {error}");
         process::exit(1)
     });
 
@@ -783,14 +777,14 @@ fn main() {
         opt.gid_map,
     )
     .unwrap_or_else(|error| {
-        error!("Error creating sandbox: {}", error);
+        error!("Error creating sandbox: {error}");
         process::exit(1)
     });
 
     // Enter the sandbox, from this point the process will be isolated (or not)
     // as chosen in '--sandbox'.
     let listener = sandbox.enter(listener).unwrap_or_else(|error| {
-        error!("Error entering sandbox: {}", error);
+        error!("Error entering sandbox: {error}");
         process::exit(1)
     });
 
@@ -864,7 +858,7 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
             .set_tag(tag)
             .build(fs)
             .unwrap_or_else(|error| {
-                error!("Error creating vhost-user backend: {}", error);
+                error!("Error creating vhost-user backend: {error}");
                 process::exit(1)
             }),
     );
@@ -879,7 +873,7 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
     info!("Waiting for vhost-user socket connection...");
 
     if let Err(e) = daemon.start(listener) {
-        error!("Failed to start daemon: {:?}", e);
+        error!("Failed to start daemon: {e:?}");
         process::exit(1);
     }
 
@@ -888,7 +882,7 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
     if let Err(e) = daemon.wait() {
         match e {
             HandleRequest(Disconnected) => info!("Client disconnected, shutting down"),
-            _ => error!("Waiting for daemon failed: {:?}", e),
+            _ => error!("Waiting for daemon failed: {e:?}"),
         }
     }
 }

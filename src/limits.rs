@@ -72,9 +72,8 @@ pub fn setup_rlimit_nofile(nofile: Option<u64>) -> Result<(), String> {
             return Err(error);
         } else {
             warn!(
-                "Failure when trying to set the limit to {}, \
-                the hard limit ({}) of open file descriptors is used instead.",
-                target_limit, rlim_max
+                "Failure when trying to set the limit to {target_limit}, \
+                the hard limit ({rlim_max}) of open file descriptors is used instead."
             );
             setup_rlimit_nofile_to(rlim_max).map_err(|error| {
                 format!("Cannot increase the soft limit to the hard limit: {error}")

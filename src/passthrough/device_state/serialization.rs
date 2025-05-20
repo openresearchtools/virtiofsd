@@ -58,8 +58,8 @@ impl From<&PassthroughFs> for serialized::PassthroughFsV2 {
                 .as_serialized(fs)
                 .unwrap_or_else(|err| {
                     warn!(
-                        "Failed to serialize inode {} (st_dev={}, mnt_id={}, st_ino={}): {}; marking as invalid",
-                        inode.inode, inode.ids.dev, inode.ids.mnt_id, inode.ids.ino, err
+                        "Failed to serialize inode {} (st_dev={}, mnt_id={}, st_ino={}): {err}; marking as invalid",
+                        inode.inode, inode.ids.dev, inode.ids.mnt_id, inode.ids.ino
                     );
                     serialized::Inode {
                         id: inode.inode,

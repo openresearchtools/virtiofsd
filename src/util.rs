@@ -110,7 +110,7 @@ pub fn wait_for_child(pid: i32) -> ! {
     capng::clear(capng::Set::BOTH);
     if let Err(e) = capng::apply(capng::Set::BOTH) {
         // Don't exit the process here since we already have a child.
-        error!("warning: can't apply the parent capabilities: {}", e);
+        error!("warning: can't apply the parent capabilities: {e}");
     }
 
     let mut status = 0;
@@ -124,10 +124,10 @@ pub fn wait_for_child(pid: i32) -> ! {
         libc::WEXITSTATUS(status)
     } else if libc::WIFSIGNALED(status) {
         let signal = libc::WTERMSIG(status);
-        error!("Child process terminated by signal {}", signal);
+        error!("Child process terminated by signal {signal}");
         -signal
     } else {
-        error!("Unexpected waitpid status: {:#X}", status);
+        error!("Unexpected waitpid status: {status:#X}");
         libc::EXIT_FAILURE
     };
 
@@ -163,6 +163,8 @@ pub fn add_cap_to_eff(cap_name: &str) -> capng::Result<()> {
 /// Same as `io::Error::other()`, but the respective io_error_other feature has only been
 /// stabilized in Rust 1.74.0, which is too new for our intended targets.
 pub fn other_io_error<E: Into<Box<dyn std::error::Error + Send + Sync>>>(err: E) -> io::Error {
+    #[allow(unknown_lints)]
+    #[allow(clippy::io_other_error)]
     io::Error::new(io::ErrorKind::Other, err)
 }
 

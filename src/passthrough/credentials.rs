@@ -123,10 +123,7 @@ impl ScopedCaps {
 
         let cap = capng::name_to_capability(cap_name).map_err(|_| {
             let err = io::Error::last_os_error();
-            error!(
-                "couldn't get the capability id for name {}: {:?}",
-                cap_name, err
-            );
+            error!("couldn't get the capability id for name {cap_name}: {err:?}");
             err
         })?;
 
@@ -137,14 +134,11 @@ impl ScopedCaps {
                 capability: cap,
             }];
             capng::update(req).map_err(|e| {
-                error!("couldn't drop {} capability: {:?}", cap, e);
+                error!("couldn't drop {cap} capability: {e:?}");
                 einval()
             })?;
             capng::apply(Set::CAPS).map_err(|e| {
-                error!(
-                    "couldn't apply capabilities after dropping {}: {:?}",
-                    cap, e
-                );
+                error!("couldn't apply capabilities after dropping {cap}: {e:?}");
                 einval()
             })?;
             Ok(Some(Self { cap }))
