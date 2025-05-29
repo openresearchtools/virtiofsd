@@ -531,12 +531,14 @@ pub fn seteffgid(gid: HostGid) -> io::Result<()> {
 /// Set supplementary group
 pub fn setsupgroup(gid: HostGid) -> io::Result<()> {
     let gid_raw = gid.into_inner();
-    check_retval(unsafe { libc::setgroups(1, &gid_raw) })?;
+    check_retval(unsafe { libc::syscall(libc::SYS_setgroups, 1, &gid_raw) })?;
     Ok(())
 }
 
 /// Drop all supplementary groups
 pub fn dropsupgroups() -> io::Result<()> {
-    check_retval(unsafe { libc::setgroups(0, std::ptr::null()) })?;
+    check_retval(unsafe {
+        libc::syscall(libc::SYS_setgroups, 0, std::ptr::null::<libc::gid_t>())
+    })?;
     Ok(())
 }
