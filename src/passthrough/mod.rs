@@ -5,6 +5,7 @@
 pub mod credentials;
 pub mod device_state;
 pub mod file_handle;
+mod guest_fd_limit;
 pub mod inode_store;
 pub mod mount_fd;
 pub mod read_only;
@@ -31,6 +32,7 @@ use crate::soft_idmap::{self, GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
 use crate::util::{other_io_error, ResultErrorContext};
 use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
+use guest_fd_limit::{GuestFdSemaphore, GuestFile};
 use mount_fd::{MPRError, MountFds};
 use stat::{statx, StatExt};
 use std::borrow::Cow;
@@ -53,7 +55,7 @@ const EMPTY_CSTR: &[u8] = b"\0";
 type Handle = u64;
 
 enum HandleDataFile {
-    File(RwLock<File>),
+    File(RwLock<GuestFile>),
     // `io::Error` does not implement `Clone`, so without wrapping it in `Arc`, returning the error
     // anywhere would be impossible without consuming it
     Invalid(Arc<io::Error>),
@@ -386,6 +388,12 @@ pub struct Config {
      * Is `take()`n when `PassthroughFs` is created, i.e. `None` during runtime.
      */
     pub gid_map: Option<Vec<soft_idmap::cmdline::IdMap>>,
+
+    /// Number of file descriptors we can allocate for guest use.  Limiting this ensures there is
+    /// always some room for file descriptors used and needed by virtiofsd internally.
+    ///
+    /// The default is `u64::MAX`.
+    pub guest_fd_limit: u64,
 }
 
 impl Default for Config {
@@ -417,6 +425,7 @@ impl Default for Config {
             migration_mode: MigrationMode::FindPaths,
             uid_map: None,
             gid_map: None,
+            guest_fd_limit: u64::MAX,
         }
     }
 }
@@ -438,6 +447,11 @@ pub struct PassthroughFs {
     // used for reading and writing data.
     handles: RwLock<BTreeMap<Handle, Arc<HandleData>>>,
     next_handle: AtomicU64,
+
+    // Represents a limit for the number of file descriptors we allow allocating for the guest.
+    // Having such a limit that is below the actual maximum number of file descriptors virtiofsd is
+    // allowed to use ensures that virtiofsd can always create file descriptors for internal use.
+    guest_fds: Arc<GuestFdSemaphore>,
 
     // Maps mount IDs to an open FD on the respective ID for the purpose of open_by_handle_at().
     // This is set when inode_file_handles is not never, since in the 'never' case,
@@ -535,6 +549,7 @@ impl PassthroughFs {
             next_inode: AtomicU64::new(fuse::ROOT_ID + 1),
             handles: RwLock::new(BTreeMap::new()),
             next_handle: AtomicU64::new(0),
+            guest_fds: Arc::new(GuestFdSemaphore::new(cfg.guest_fd_limit)),
             mount_fds,
             proc_self_fd,
             root_fd,
@@ -862,7 +877,7 @@ impl PassthroughFs {
             let file_or_handle = if let Some(h) = handle.as_ref() {
                 FileOrHandle::Handle(self.make_file_handle_openable(h)?)
             } else {
-                FileOrHandle::File(path_fd)
+                FileOrHandle::File(self.guest_fds.allocate(path_fd)?)
             };
 
             let mig_info = if self.track_migration_info.load(Ordering::Relaxed) {
@@ -943,7 +958,7 @@ impl PassthroughFs {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let data = HandleData {
             inode,
-            file: file.into(),
+            file: self.guest_fds.allocate(file)?.into(),
             migration_info: HandleMigrationInfo::new(flags as i32),
         };
 
@@ -1263,7 +1278,7 @@ impl PassthroughFs {
         let file_or_handle = if let Some(h) = handle.as_ref() {
             FileOrHandle::Handle(self.make_file_handle_openable(h)?)
         } else {
-            FileOrHandle::File(path_fd)
+            FileOrHandle::File(self.guest_fds.allocate(path_fd)?)
         };
 
         // Always keep the root node's migration info set (`InodeStore::clear_migration_info()`
@@ -1764,7 +1779,7 @@ impl FileSystem for PassthroughFs {
                 let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
                 let data = HandleData {
                     inode: entry.inode,
-                    file: file.into(),
+                    file: self.guest_fds.allocate(file)?.into(),
                     migration_info: HandleMigrationInfo::new(flags as i32),
                 };
 
@@ -1805,7 +1820,7 @@ impl FileSystem for PassthroughFs {
         // This is safe because read_from_file_at uses preadv64, so the underlying file descriptor
         // offset is not affected by this operation.
         let f = data.file.get()?.read().unwrap();
-        w.read_from_file_at(&f, size as usize, offset)
+        w.read_from_file_at(f.get_file(), size as usize, offset)
     }
 
     fn write<R: ZeroCopyReader>(
@@ -1847,7 +1862,7 @@ impl FileSystem for PassthroughFs {
             // write on the underlying file is performed in append mode.
             let is_append = flags & libc::O_APPEND as u32 != 0;
             let flags = (!delayed_write && is_append).then_some(oslib::WritevFlags::RWF_APPEND);
-            r.write_to_file_at(&f, size as usize, offset, flags)
+            r.write_to_file_at(f.get_file(), size as usize, offset, flags)
         }
     }
 
@@ -2662,7 +2677,7 @@ impl FileSystem for PassthroughFs {
 }
 
 impl HandleDataFile {
-    fn get(&self) -> io::Result<&'_ RwLock<File>> {
+    fn get(&self) -> io::Result<&'_ RwLock<GuestFile>> {
         match self {
             HandleDataFile::File(file) => Ok(file),
             HandleDataFile::Invalid(err) => Err(io::Error::new(
@@ -2673,8 +2688,8 @@ impl HandleDataFile {
     }
 }
 
-impl From<File> for HandleDataFile {
-    fn from(file: File) -> Self {
+impl From<GuestFile> for HandleDataFile {
+    fn from(file: GuestFile) -> Self {
         HandleDataFile::File(RwLock::new(file))
     }
 }

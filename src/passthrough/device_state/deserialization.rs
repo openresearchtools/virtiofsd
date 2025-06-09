@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 impl TryFrom<Vec<u8>> for serialized::PassthroughFs {
     type Error = io::Error;
@@ -372,7 +372,7 @@ impl serialized::Inode {
         let file_or_handle = if let Some(h) = handle.as_ref() {
             FileOrHandle::Handle(fs.make_file_handle_openable(h)?)
         } else {
-            FileOrHandle::File(fd)
+            FileOrHandle::File(fs.guest_fds.allocate(fd)?)
         };
 
         Ok(InodeData {
@@ -455,7 +455,7 @@ impl serialized::Inode {
         let st = statx(&fd, None).err_context(|| "stat")?;
 
         let file_or_handle = match fs.cfg.inode_file_handles {
-            InodeFileHandlesMode::Never => FileOrHandle::File(fd),
+            InodeFileHandlesMode::Never => FileOrHandle::File(fs.guest_fds.allocate(fd)?),
             InodeFileHandlesMode::Mandatory | InodeFileHandlesMode::Prefer => {
                 FileOrHandle::Handle(ofh)
             }
@@ -490,7 +490,7 @@ impl serialized::Handle {
                     .open_file(flags, &fs.proc_self_fd)
                     .and_then(|f| f.into_file())
                 {
-                    Ok(f) => HandleDataFile::File(RwLock::new(f)),
+                    Ok(f) => fs.guest_fds.allocate(f).map(Into::into),
                     Err(err) => {
                         let error_msg = if let Ok(path) = inode.get_path(&fs.proc_self_fd) {
                             let p = path.as_c_str().to_string_lossy();
@@ -501,16 +501,21 @@ impl serialized::Handle {
                         } else {
                             format!("Opening inode {} as handle {}: {err}", self.inode, self.id)
                         };
-                        let err = io::Error::new(err.kind(), error_msg);
-                        match fs.cfg.migration_on_error {
-                            MigrationOnError::Abort => return Err(err),
-                            MigrationOnError::GuestError => {
-                                warn!("Invalid handle {} is open in guest: {err}", self.id);
-                                HandleDataFile::Invalid(Arc::new(err))
-                            }
-                        }
+                        Err(io::Error::new(err.kind(), error_msg))
                     }
                 };
+
+                let handle_data_file = match handle_data_file {
+                    Ok(hdf) => hdf,
+                    Err(err) => match fs.cfg.migration_on_error {
+                        MigrationOnError::Abort => return Err(err),
+                        MigrationOnError::GuestError => {
+                            warn!("Invalid handle {} is open in guest: {err}", self.id);
+                            HandleDataFile::Invalid(Arc::new(err))
+                        }
+                    },
+                };
+
                 let migration_info = HandleMigrationInfo::OpenInode { flags };
                 (handle_data_file, migration_info)
             }

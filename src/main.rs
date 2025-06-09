@@ -12,7 +12,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, process};
+use std::{cmp, env, process};
 use virtiofsd::idmap::{GidMap, UidMap};
 
 use clap::{CommandFactory, Parser};
@@ -32,6 +32,23 @@ use virtiofsd::util::write_pid_file;
 use virtiofsd::vhost_user::{Error, VhostUserFsBackendBuilder, MAX_TAG_LEN};
 use virtiofsd::{limits, oslib, soft_idmap};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+
+/// Maximum number of memory areas (slots) supported by the vhost-user-backend crate.
+///
+/// The constant has the same name there, but is not exported.
+const MAX_MEM_SLOTS: u64 = 509;
+
+/// How many file descriptors to reserve for internal use.
+///
+/// The exact value has been chosen mostly arbitrarily, but we know we need one FD per shared
+/// memory area, which is where the `MAX_MEM_SLOTS` comes from.
+///
+/// Given how allocating FD towards the guest quota works, we also need to add one FD per thread in
+/// our pool: FDs are created first, and only then accounted for.  All threads must be able to
+/// simultaneously create an FD and then have it be accounted for, so we need to make room for as
+/// many additional FDs as there are threads in the pool.  The thread pool size is set at runtime,
+/// though, so cannot be taken into account here, but instead where this constant is used.
+const INTERNAL_FD_RESERVE: u64 = MAX_MEM_SLOTS + 100;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -765,10 +782,24 @@ fn main() {
         }
     }
 
-    limits::setup_rlimit_nofile(opt.rlimit_nofile).unwrap_or_else(|error| {
+    let fd_count_limit = limits::setup_rlimit_nofile(opt.rlimit_nofile).unwrap_or_else(|error| {
         error!("Error increasing number of open files: {error}");
         process::exit(1)
     });
+
+    // Account for guest FDs that are created first and only accounted for then (see doc comment on
+    // `INTERNAL_FD_RESERVE`
+    let internal_fd_reserve = INTERNAL_FD_RESERVE + cmp::max(opt.thread_pool_size as u64, 1);
+    let guest_fd_limit = fd_count_limit.checked_sub(internal_fd_reserve).unwrap_or_else(|| {
+        error!("Maximum number of file descriptors too small: Limit is {fd_count_limit}, must be at least {internal_fd_reserve}");
+        process::exit(1)
+    });
+
+    // Warn the user if there is a suspiciously low limit on the guest FD count that will make it
+    // hard to actually do something; the number of `128` is completely arbitrary.
+    if guest_fd_limit < 128 {
+        warn!("File descriptor count limit is very small, leaving only {guest_fd_limit} file descriptors for the guest");
+    }
 
     let mut sandbox = Sandbox::new(
         shared_dir.to_string(),
@@ -814,6 +845,7 @@ fn main() {
         migration_mode: opt.migration_mode,
         uid_map: Some(opt.translate_uid),
         gid_map: Some(opt.translate_gid),
+        guest_fd_limit,
         ..Default::default()
     };
 

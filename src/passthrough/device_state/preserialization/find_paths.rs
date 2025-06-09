@@ -286,7 +286,7 @@ impl<'a> Constructor<'a> {
         let file_or_handle = if let Some(h) = handle.as_ref() {
             FileOrHandle::Handle(self.fs.make_file_handle_openable(h)?)
         } else {
-            FileOrHandle::File(path_fd)
+            FileOrHandle::File(self.fs.guest_fds.allocate(path_fd)?)
         };
 
         let mig_info = InodeMigrationInfo::new_internal(
