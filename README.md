@@ -94,7 +94,7 @@ Honor the `O_DIRECT` flag passed down by guest applications.
 ```shell
 --announce-submounts
 ```
-Tell the guest which directories are mount points.
+Tell the guest which directories are mount points [enabled by default].
 If multiple filesystems are mounted in the shared directory,
 virtiofsd passes inode IDs directly to the guest, and because such IDs
 are unique only on a single filesystem, it is possible that the guest
@@ -109,6 +109,12 @@ will call `syncfs()` on each submount.
 On the other hand, when running without `--announce-submounts`,
 the client only sends a `SYNCFS` request for the root mount,
 this may lead to data loss/corruption.
+
+```shell
+--no-announce-submounts
+```
+Disable announce-submounts mode. This flag overrides the default behavior
+of announcing submounts to the guest.
 
 ```shell
 --no-killpriv-v2
@@ -495,7 +501,7 @@ Export `/mnt` on vhost-user UNIX domain socket `/tmp/vfsd.sock`:
 
 ```shell
 host# virtiofsd --socket-path=/tmp/vfsd.sock --shared-dir /mnt \
-        --announce-submounts --inode-file-handles=mandatory &
+        --inode-file-handles=mandatory &
 
 host# qemu-system \
         -blockdev file,node-name=hdd,filename=<your image> \
@@ -547,14 +553,14 @@ mapped in as themselves with the help of the `newuidmap(1)` and `newgidmap(1)` h
 
 ```shell
 host$ podman unshare -- virtiofsd --socket-path=/tmp/vfsd.sock --shared-dir /mnt \
-        --announce-submounts --sandbox chroot &
+        --sandbox chroot &
 ```
 Alternatively we can also achieve the same effect without Podman by relying on `unshare(1)` included in
 `util-linux` which has the benefit that it should already be installed for most users. Use it like so:
 
 ```shell
 host$ unshare -r --map-auto -- virtiofsd --socket-path=/tmp/vfsd.sock --shared-dir /mnt \
-        --announce-submounts --sandbox chroot &
+        --sandbox chroot &
 ```
 
 Using `lxc-usernsexec(1)`, we could leave the invoking user outside the mapping, having
@@ -562,14 +568,14 @@ the root user inside the user namespace mapped to the user and group 100000:
 
 ```shell
 host$ lxc-usernsexec -m b:0:100000:65536 -- virtiofsd --socket-path=/tmp/vfsd.sock \
-        --shared-dir /mnt --announce-submounts --sandbox chroot &
+        --shared-dir /mnt --sandbox chroot &
 ```
 
 In order to have the same behavior as `podman-unshare(1)`, we need to run
 
 ```shell
 host$ lxc-usernsexec -m b:0:1000:1 -m b:1:100000:65536 -- virtiofsd --socket-path=/tmp/vfsd.sock \
-        --shared-dir /mnt --announce-submounts --sandbox chroot &
+        --shared-dir /mnt --sandbox chroot &
 ```
 
 We could also select `--sandbox none` instead of `--sandbox chroot`.
@@ -610,9 +616,9 @@ exporting `share0`, `share1`:
 mkdir -p share/{sh0,sh1}
 mount -o bind share0 share/sh0
 mount -o bind share1 share/sh1
-virtiofsd --announce-submounts --shared-dir share ...
+virtiofsd --shared-dir share ...
 ```
-Note the use of `--announce-submounts` to prevent data loss/corruption.
+Note: announce-submounts is enabled by default to prevent data loss/corruption.
 
 - How to add virtiofs devices to an existing qemu command-line:
 
