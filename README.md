@@ -512,12 +512,27 @@ guest# mount -t virtiofs myfs /mnt
 See [FAQ](#faq) for adding virtiofs config to an existing qemu command-line.
 
 ### Running as non-privileged user
-When run without root, virtiofsd requires a user namespace (see `user_namespaces(7)`)
-to be able to switch between arbitrary user/group IDs within the guest.
-virtiofsd will fail in a user namespace where UIDs/GIDs have not been mapped
-(i.e., `uid_map` and `gid_map` files have not been written).
-There are many options to run virtiofsd inside a user namespace.
-For instance:
+
+virtiofsd can be run as a non-privileged user without a sandbox. If
+you take care to ensure the UID/GID used in the guest matches the
+effective UID of virtiofsd on the host you will be able to mount your
+host $HOME into the guest and use it transparently.
+
+If the UID/GID on the guest is different from the host but you only
+expect a single user to be accessing files you can use
+`--translate-uid` to map it to the host UID:
+
+```shell
+--translate-uid=map:<guest UID>:<host UID>:1
+```
+
+with a similar mapping for `--translate-gid`.
+
+If you want to support multiple user/group IDs within the guest, you
+can use subordinate UIDs/GIDs (subuids/subgids) that virtiofsd can
+then use despite not running as root. There are many options to employ
+a user namespace to map those subuids/subgids for virtiofsd to use for
+the guest, for instance:
 
 Let's assume the invoking UID and GID is 1000 and the content of both `/etc/subuid`
 and `/etc/subgid` are:
