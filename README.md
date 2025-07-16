@@ -290,7 +290,7 @@ with resources, but may also be important in cases where virtiofsd should only h
 for files that are open in the guest, e.g. to get around bad interactions with NFS's silly renaming
 (see [NFS FAQ, Section D2: "What is a "silly rename"?"](http://nfs.sourceforge.net/)).
 
-Default: never.
+Default: prefer.
 
 ```shell
 --xattrmap <xattrmap>
