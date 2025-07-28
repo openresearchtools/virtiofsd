@@ -34,6 +34,21 @@ test:
       # necessary.
     - main@virtio-fs/virtiofsd
 
+# Build documentation, including private items (making it potentially more
+# useful than docs.rs).
+# Does not include documentation of main.rs: The binary has the same name as the
+# library, so cargo doc can only generate one or the other.  We could generate
+# both, manually renaming the binary folder, but then again there isn’t really
+# anything important in main.rs anyway.
+docs:
+  before_script:
+    - apk add musl-dev
+  script:
+    - RUSTDOCFLAGS="-D warnings" cargo doc --verbose --no-deps --all-features --document-private-items
+  artifacts:
+    paths:
+      - target/doc
+
 # Build a statically linked and optimized binary for publishing.
 #
 # This only runs when code is merged to the 'main' branch.
@@ -46,5 +61,27 @@ publish:
     name: "virtiofsd-$CI_COMMIT_SHORT_SHA"
     paths:
       - target/x86_64-unknown-linux-musl/release/virtiofsd
+  only:
+    - main@virtio-fs/virtiofsd
+
+# Publish the built documentation to our gitlab pages.
+pages:
+  dependencies:
+    # We need the docs artifacts, so need to specify it here
+    - docs
+  needs:
+    # We need docs to finish to get its artifacts; because we don’t have stages
+    # in this pipeline, we need to explicitly list it here
+    - job: docs
+  script:
+    - mkdir -p public
+    - mv target/doc public/doc
+    # For the https://virtiofs.gitlab.io/virtiofsd URL
+    - echo '/virtiofsd /virtiofsd/doc/virtiofsd/index.html 302' >> public/_redirects
+    # For a potential https://virtiofsd-*.gitlab.io/ URL
+    - echo '/ /doc/virtiofsd/index.html 302' >> public/_redirects
+  artifacts:
+    paths:
+      - public
   only:
     - main@virtio-fs/virtiofsd
