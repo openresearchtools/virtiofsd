@@ -76,7 +76,7 @@ impl<P> ReadDir<P> {
 }
 
 impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
-    fn next(&mut self) -> Option<DirEntry> {
+    fn next(&mut self) -> Option<DirEntry<'_>> {
         let rem = &self.buf[self.current..self.end];
         if rem.is_empty() {
             return None;

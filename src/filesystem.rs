@@ -211,7 +211,7 @@ pub struct SecContext {
 /// regular iterator that yields a `DirEntry` due to its generic lifetime parameter.
 pub trait DirectoryIterator {
     /// Returns the next entry in the directory or `None` if there are no more.
-    fn next(&mut self) -> Option<DirEntry>;
+    fn next(&mut self) -> Option<DirEntry<'_>>;
 }
 
 /// The main trait that connects a file system with a transport.
