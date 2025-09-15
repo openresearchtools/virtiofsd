@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{idmap, oslib, util};
+use crate::{idmap, oslib, passthrough, util};
 use idmap::{GidMap, IdMapSetUpPipeMessage, UidMap};
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -55,6 +55,10 @@ pub enum Error {
     OpenNewRoot(io::Error),
     /// Failed to open old root.
     OpenOldRoot(io::Error),
+    /// Failed to stat new root.
+    StatNewRoot(io::Error),
+    /// Failed to stat old root.
+    StatOldRoot(io::Error),
     /// Failed to open `/proc/self`.
     OpenProcSelf(io::Error),
     /// Failed to open `/proc/self/fd`.
@@ -268,30 +272,40 @@ impl Sandbox {
         // Change to new root directory to prepare for `pivot_root` syscall.
         oslib::fchdir(newroot_fd).map_err(Error::ChdirNewRoot)?;
 
-        // Call to `pivot_root` using `.` as both new and old root.
-        let c_current_dir = CString::new(".").unwrap();
-        let ret = unsafe {
-            libc::syscall(
-                libc::SYS_pivot_root,
-                c_current_dir.as_ptr(),
-                c_current_dir.as_ptr(),
-            )
-        };
-        if ret < 0 {
-            return Err(Error::PivotRoot(std::io::Error::last_os_error()));
+        // Check if we are supposed to switch to our current rootfs
+        let old_st = passthrough::statx(&oldroot_fd, None).map_err(Error::StatOldRoot)?;
+        let new_st = passthrough::statx(&newroot_fd, None).map_err(Error::StatNewRoot)?;
+        let switch_to_current_rootfs = (old_st.mnt_id == new_st.mnt_id)
+            && (old_st.st.st_dev == new_st.st.st_dev)
+            && (old_st.st.st_ino == new_st.st.st_ino);
+
+        if !switch_to_current_rootfs {
+            // Call to `pivot_root` using `.` as both new and old root.
+            let c_current_dir = CString::new(".").unwrap();
+            let ret = unsafe {
+                libc::syscall(
+                    libc::SYS_pivot_root,
+                    c_current_dir.as_ptr(),
+                    c_current_dir.as_ptr(),
+                )
+            };
+            if ret < 0 {
+                return Err(Error::PivotRoot(std::io::Error::last_os_error()));
+            }
+
+            // Change to old root directory to prepare for cleaning up and unmounting it.
+            oslib::fchdir(oldroot_fd).map_err(Error::ChdirOldRoot)?;
+
+            // Clean up old root to avoid mount namespace propagation.
+            oslib::mount(None, ".", None, libc::MS_SLAVE | libc::MS_REC)
+                .map_err(Error::CleanMount)?;
+
+            // Lazily unmount old root.
+            oslib::umount2(".", libc::MNT_DETACH).map_err(Error::UmountOldRoot)?;
+
+            // Change to new root.
+            oslib::fchdir(newroot_fd).map_err(Error::ChdirNewRoot)?;
         }
-
-        // Change to old root directory to prepare for cleaning up and unmounting it.
-        oslib::fchdir(oldroot_fd).map_err(Error::ChdirOldRoot)?;
-
-        // Clean up old root to avoid mount namespace propagation.
-        oslib::mount(None, ".", None, libc::MS_SLAVE | libc::MS_REC).map_err(Error::CleanMount)?;
-
-        // Lazily unmount old root.
-        oslib::umount2(".", libc::MNT_DETACH).map_err(Error::UmountOldRoot)?;
-
-        // Change to new root.
-        oslib::fchdir(newroot_fd).map_err(Error::ChdirNewRoot)?;
 
         // We no longer need these file descriptors, so close them.
         unsafe { libc::close(newroot_fd) };
