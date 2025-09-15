@@ -34,7 +34,7 @@ use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
 use guest_fd_limit::{GuestFdSemaphore, GuestFile};
 use mount_fd::{MPRError, MountFds};
-use stat::{statx, StatExt};
+pub(crate) use stat::{statx, StatExt};
 use std::borrow::Cow;
 use std::collections::{btree_map, BTreeMap};
 use std::convert::TryInto;
