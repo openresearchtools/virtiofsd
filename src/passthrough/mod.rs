@@ -464,8 +464,8 @@ pub struct PassthroughFs {
     // meant to be serving doesn't have access to `/proc/self/fd`.
     proc_self_fd: File,
 
-    // File descriptor pointing to the current working directory.
-    cwd_fd: File,
+    // File descriptor pointing to the original working directory.
+    orig_wd_fd: File,
 
     // Whether writeback caching is enabled for this directory. This will only be true when
     // `cfg.writeback` is true and `init` was called with `FsOptions::WRITEBACK_CACHE`.
@@ -509,9 +509,9 @@ impl PassthroughFs {
             )?
         };
 
-        let cwd_fd = openat_verbose(
+        let orig_wd_fd = openat_verbose(
             &libc::AT_FDCWD,
-            "/proc/self/cwd",
+            ".",
             libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )?;
 
@@ -552,7 +552,7 @@ impl PassthroughFs {
             guest_fds: Arc::new(GuestFdSemaphore::new(cfg.guest_fd_limit)),
             mount_fds,
             proc_self_fd,
-            cwd_fd,
+            orig_wd_fd,
             writeback: AtomicBool::new(false),
             announce_submounts: AtomicBool::new(false),
             posix_acl: AtomicBool::new(false),
@@ -1106,7 +1106,7 @@ impl PassthroughFs {
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                     let _working_dir_guard = set_working_directory(
                         self.proc_self_fd.as_raw_fd(),
-                        self.cwd_fd.as_raw_fd(),
+                        self.orig_wd_fd.as_raw_fd(),
                     );
                     unsafe { libc::removexattr(proc_file_name.as_ptr(), xattrname.as_ptr()) }
                 } else {
@@ -1239,7 +1239,7 @@ impl PassthroughFs {
         };
 
         let _working_dir_guard =
-            set_working_directory(self.proc_self_fd.as_raw_fd(), self.cwd_fd.as_raw_fd());
+            set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
 
         let res = unsafe {
             libc::setxattr(
@@ -2394,7 +2394,7 @@ impl FileSystem for PassthroughFs {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             let _working_dir_guard =
-                set_working_directory(self.proc_self_fd.as_raw_fd(), self.cwd_fd.as_raw_fd());
+                set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
 
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe {
@@ -2458,7 +2458,7 @@ impl FileSystem for PassthroughFs {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             let _working_dir_guard =
-                set_working_directory(self.proc_self_fd.as_raw_fd(), self.cwd_fd.as_raw_fd());
+                set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
 
             // Safe because this will only modify the contents of `buf`.
             unsafe {
@@ -2510,7 +2510,7 @@ impl FileSystem for PassthroughFs {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             let _working_dir_guard =
-                set_working_directory(self.proc_self_fd.as_raw_fd(), self.cwd_fd.as_raw_fd());
+                set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
 
             // Safe because this will only modify the contents of `buf`.
             unsafe {
@@ -2556,7 +2556,7 @@ impl FileSystem for PassthroughFs {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             let _working_dir_guard =
-                set_working_directory(self.proc_self_fd.as_raw_fd(), self.cwd_fd.as_raw_fd());
+                set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
 
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe { libc::removexattr(procname.as_ptr(), name.as_ptr()) }
