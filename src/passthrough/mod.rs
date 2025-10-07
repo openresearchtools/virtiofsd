@@ -88,10 +88,6 @@ impl Drop for ScopedWorkingDirectory {
     }
 }
 
-fn set_working_directory(new_wd: RawFd, old_wd: RawFd) -> ScopedWorkingDirectory {
-    ScopedWorkingDirectory::new(new_wd, old_wd)
-}
-
 /// The caching policy that the file system should report to the FUSE client. By default the FUSE
 /// protocol uses close-to-open consistency. This means that any cached contents of the file are
 /// invalidated the next time that file is opened.
@@ -581,6 +577,10 @@ impl PassthroughFs {
         oslib::umask(0o000);
 
         Ok(fs)
+    }
+
+    fn switch_to_proc_self_fd(&self) -> ScopedWorkingDirectory {
+        ScopedWorkingDirectory::new(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd())
     }
 
     pub fn keep_fds(&self) -> Vec<RawFd> {
@@ -1104,10 +1104,7 @@ impl PassthroughFs {
                 let res = if o_path {
                     let proc_file_name = CString::new(format!("{fd}"))
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                    let _working_dir_guard = set_working_directory(
-                        self.proc_self_fd.as_raw_fd(),
-                        self.orig_wd_fd.as_raw_fd(),
-                    );
+                    let _working_dir_guard = self.switch_to_proc_self_fd();
                     unsafe { libc::removexattr(proc_file_name.as_ptr(), xattrname.as_ptr()) }
                 } else {
                     unsafe { libc::fremovexattr(fd, xattrname.as_ptr()) }
@@ -1238,8 +1235,7 @@ impl PassthroughFs {
             }
         };
 
-        let _working_dir_guard =
-            set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
+        let _working_dir_guard = self.switch_to_proc_self_fd();
 
         let res = unsafe {
             libc::setxattr(
@@ -2393,8 +2389,7 @@ impl FileSystem for PassthroughFs {
             let procname = CString::new(format!("{}", file.as_raw_fd()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            let _working_dir_guard =
-                set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
+            let _working_dir_guard = self.switch_to_proc_self_fd();
 
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe {
@@ -2457,8 +2452,7 @@ impl FileSystem for PassthroughFs {
             let procname = CString::new(format!("{}", file.as_raw_fd()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            let _working_dir_guard =
-                set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
+            let _working_dir_guard = self.switch_to_proc_self_fd();
 
             // Safe because this will only modify the contents of `buf`.
             unsafe {
@@ -2509,8 +2503,7 @@ impl FileSystem for PassthroughFs {
             let procname = CString::new(format!("{}", file.as_raw_fd()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            let _working_dir_guard =
-                set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
+            let _working_dir_guard = self.switch_to_proc_self_fd();
 
             // Safe because this will only modify the contents of `buf`.
             unsafe {
@@ -2555,8 +2548,7 @@ impl FileSystem for PassthroughFs {
             let procname = CString::new(format!("{}", file.as_raw_fd()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            let _working_dir_guard =
-                set_working_directory(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd());
+            let _working_dir_guard = self.switch_to_proc_self_fd();
 
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe { libc::removexattr(procname.as_ptr(), name.as_ptr()) }
