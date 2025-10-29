@@ -157,12 +157,24 @@ pub trait ZeroCopyWriter {
     /// Does not do short reads, unless one of the above happens; i.e. will invoke the underlying
     /// file read function until `count` bytes have been read or it returns 0 (cases 1 or 2 above)
     /// or `self` has no more space (case 2 above).
-    fn read_from_file_at(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize>;
+    fn read_from_file_at(
+        &mut self,
+        f: &File,
+        count: usize,
+        off: u64,
+        flags: Option<oslib::ReadvFlags>,
+    ) -> io::Result<usize>;
 }
 
 impl<W: ZeroCopyWriter> ZeroCopyWriter for &mut W {
-    fn read_from_file_at(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
-        (**self).read_from_file_at(f, count, off)
+    fn read_from_file_at(
+        &mut self,
+        f: &File,
+        count: usize,
+        off: u64,
+        flags: Option<oslib::ReadvFlags>,
+    ) -> io::Result<usize> {
+        (**self).read_from_file_at(f, count, off, flags)
     }
 }
 

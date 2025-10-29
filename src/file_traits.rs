@@ -34,7 +34,12 @@ pub trait FileReadWriteAtVolatile<B: BitmapSlice> {
     /// Reads bytes from this file at `offset` into the given slice of buffers, returning the number
     /// of bytes read on success. Data is copied to fill each buffer in order, with the final buffer
     /// written to possibly being only partially filled.
-    fn read_vectored_at_volatile(&self, bufs: &[&VolatileSlice<B>], offset: u64) -> Result<usize>;
+    fn read_vectored_at_volatile(
+        &self,
+        bufs: &[&VolatileSlice<B>],
+        offset: u64,
+        flags: Option<oslib::ReadvFlags>,
+    ) -> Result<usize>;
 
     /// Writes bytes to this file at `offset` from the given slice of buffers, returning the number
     /// of bytes written on success. Data is copied from each buffer in order, with the final buffer
@@ -48,8 +53,13 @@ pub trait FileReadWriteAtVolatile<B: BitmapSlice> {
 }
 
 impl<B: BitmapSlice, T: FileReadWriteAtVolatile<B> + ?Sized> FileReadWriteAtVolatile<B> for &T {
-    fn read_vectored_at_volatile(&self, bufs: &[&VolatileSlice<B>], offset: u64) -> Result<usize> {
-        (**self).read_vectored_at_volatile(bufs, offset)
+    fn read_vectored_at_volatile(
+        &self,
+        bufs: &[&VolatileSlice<B>],
+        offset: u64,
+        flags: Option<oslib::ReadvFlags>,
+    ) -> Result<usize> {
+        (**self).read_vectored_at_volatile(bufs, offset, flags)
     }
 
     fn write_vectored_at_volatile(
@@ -69,6 +79,7 @@ macro_rules! volatile_impl {
                 &self,
                 bufs: &[&VolatileSlice<B>],
                 offset: u64,
+                flags: Option<oslib::ReadvFlags>,
             ) -> Result<usize> {
                 let slice_guards: Vec<_> = bufs.iter().map(|s| s.ptr_guard_mut()).collect();
                 let iovecs: Vec<libc::iovec> = slice_guards
@@ -92,7 +103,7 @@ macro_rules! volatile_impl {
                         self.as_fd(),
                         iovecs.as_slice(),
                         offset.try_into().unwrap(),
-                        None,
+                        flags,
                     )?
                 };
 
