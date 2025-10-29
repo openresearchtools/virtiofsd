@@ -359,35 +359,6 @@ pub fn open_by_handle_at(
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-mod writev {
-    //! musl does not provide a wrapper for the `pwritev2(2)` system call,
-    //! we need to call it using `syscall(2)`.
-
-    #[cfg(target_env = "gnu")]
-    pub use libc::pwritev2;
-
-    #[cfg(target_env = "musl")]
-    pub unsafe fn pwritev2(
-        fd: libc::c_int,
-        iov: *const libc::iovec,
-        iovcnt: libc::c_int,
-        offset: libc::off_t,
-        flags: libc::c_int,
-    ) -> libc::ssize_t {
-        // The `pwritev2(2)` syscall expects to receive the 64-bit offset split in
-        // its high and low parts (see `syscall(2)`). On 64-bit architectures we
-        // set `lo_off=offset` and `hi_off=0` (glibc does it), since `hi_off` is cleared,
-        // so we need to make sure of not clear the higher 32 bits of `lo_off`, otherwise
-        // the offset will be 0 on 64-bit architectures.
-        let lo_off = offset as libc::c_long; // warn: do not clear the higher 32 bits
-        let hi_off = (offset as u64).checked_shr(libc::c_long::BITS).unwrap_or(0) as libc::c_long;
-        unsafe {
-            libc::syscall(libc::SYS_pwritev2, fd, iov, iovcnt, lo_off, hi_off, flags)
-                as libc::ssize_t
-        }
-    }
-}
-
 // We cannot use libc::RWF_HIPRI, etc, because these constants are not defined in musl.
 bitflags! {
     /// A bitwise OR of zero or more flags passed in as a parameter to the
@@ -461,7 +432,7 @@ pub unsafe fn writev_at(
     // to the iovec slice `ìovecs` of `iovcnt` elements. However, the caller
     // must ensure that each iovec element has a valid `iov_base` pointer and `iov_len`.
     let bytes_written = check_retval(unsafe {
-        writev::pwritev2(
+        libc::pwritev2(
             fd.as_raw_fd(),
             iovecs.as_ptr(),
             iovecs.len() as libc::c_int,
