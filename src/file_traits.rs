@@ -4,13 +4,13 @@
 
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::{Error, Result};
-use std::os::unix::io::{AsFd, AsRawFd};
+use std::io::Result;
+use std::os::unix::io::AsFd;
 
 use vm_memory::VolatileSlice;
 
 use crate::oslib;
-use libc::{c_int, c_void, off64_t, preadv64, size_t};
+use libc::{c_void, size_t};
 use vm_memory::bitmap::BitmapSlice;
 
 /// A trait for setting the size of a file.
@@ -87,31 +87,27 @@ macro_rules! volatile_impl {
                 // accessed and the kernel is expected to handle arbitrary
                 // memory for I/O. The pointers into the slice are valid since
                 // the slice_guards are still in scope.
-                let ret = unsafe {
-                    preadv64(
-                        self.as_raw_fd(),
-                        &iovecs[0],
-                        iovecs.len() as c_int,
-                        offset as off64_t,
-                    )
+                let bytes_read = unsafe {
+                    oslib::readv_at(
+                        self.as_fd(),
+                        iovecs.as_slice(),
+                        offset.try_into().unwrap(),
+                        None,
+                    )?
                 };
 
-                if ret >= 0 {
-                    let mut total = 0;
-                    for vs in bufs {
-                        // Each `VolatileSlice` has a "local" bitmap (i.e., the offset 0 in the
-                        // bitmap corresponds to the beginning of the `VolatileSlice`)
-                        vs.bitmap()
-                            .mark_dirty(0, std::cmp::min(ret as usize - total, vs.len()));
-                        total += vs.len();
-                        if total >= ret as usize {
-                            break;
-                        }
+                let mut total = 0;
+                for vs in bufs {
+                    // Each `VolatileSlice` has a "local" bitmap (i.e., the offset 0 in the
+                    // bitmap corresponds to the beginning of the `VolatileSlice`)
+                    vs.bitmap()
+                        .mark_dirty(0, std::cmp::min(bytes_read - total, vs.len()));
+                    total += vs.len();
+                    if total >= bytes_read {
+                        break;
                     }
-                    Ok(ret as usize)
-                } else {
-                    Err(Error::last_os_error())
                 }
+                Ok(bytes_read)
             }
 
             fn write_vectored_at_volatile(

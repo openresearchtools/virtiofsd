@@ -396,6 +396,28 @@ bitflags! {
     }
 }
 
+bitflags! {
+    /// A bitwise OR of zero or more flags passed in as a parameter to the
+    /// read vectored function `readv_at()`.
+    pub struct ReadvFlags: i32 {
+        /// High priority read. Allows block-based filesystems to use polling of the device, which
+        /// provides lower latency, but may use additional resources. (Currently, this feature is
+        /// usable only on a file descriptor opened using the O_DIRECT flag.)
+        const RWF_HIPRI = libc::RWF_HIPRI;
+
+        /// Do not wait for data which is not immediately available. If this flag is specified,
+        /// the `readv_at()` will return instantly if it would have to read data from the backing
+        /// storage or wait for a lock. If some data was successfully read, it will return the
+        /// number of bytes read. If no bytes were read, it will return -1 and set errno to
+        /// `EAGAIN`.
+        const RWF_NOWAIT = libc::RWF_NOWAIT;
+
+        /// Uncached buffered read, any data read will be removed from the page cache upon
+        /// completion (since Linux 6.14).
+        const RWF_DONTCACHE = libc::RWF_DONTCACHE;
+    }
+}
+
 /// Safe wrapper for `pwritev2(2)`
 ///
 /// This system call is similar `pwritev(2)`, but add a new argument,
@@ -431,6 +453,43 @@ pub unsafe fn writev_at(
         )
     })?;
     Ok(bytes_written as usize)
+}
+
+/// Safe wrapper for `preadv2(2)`
+///
+/// This system call is similar `preadv(2)`, but add a new argument,
+/// flags, which modifies the behavior on a per-call basis.
+/// Unlike `preadv(2)`, if the offset argument is -1, then the current file offset
+/// is used and updated.
+///
+/// # Errors
+///
+/// Will return `Err(errno)` if `preadv2(2)` fails, see `preadv2(2)` for details.
+///
+/// # Safety
+///
+/// The caller must ensure that each iovec element is valid (i.e., it has a valid `iov_base`
+/// pointer and `iov_len`).
+pub unsafe fn readv_at(
+    fd: BorrowedFd,
+    iovecs: &[libc::iovec],
+    offset: i64,
+    flags: Option<ReadvFlags>,
+) -> Result<usize> {
+    let flags = flags.unwrap_or(ReadvFlags::empty());
+    // SAFETY: `fd` is a valid filed descriptor, `iov` is a valid pointer
+    // to the iovec slice `ìovecs` of `iovcnt` elements. However, the caller
+    // must ensure that each iovec element has a valid `iov_base` pointer and `iov_len`.
+    let bytes_read = check_retval(unsafe {
+        libc::preadv2(
+            fd.as_raw_fd(),
+            iovecs.as_ptr(),
+            iovecs.len() as libc::c_int,
+            offset,
+            flags.bits(),
+        )
+    })?;
+    Ok(bytes_read as usize)
 }
 
 pub struct PipeReader(File);
