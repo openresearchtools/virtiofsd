@@ -60,10 +60,16 @@ impl ZeroCopyReader for ZcReader<'_> {
 struct ZcWriter<'a>(Writer<'a>);
 
 impl ZeroCopyWriter for ZcWriter<'_> {
-    fn read_from_file_at(&mut self, f: &File, mut count: usize, mut off: u64) -> io::Result<usize> {
+    fn read_from_file_at(
+        &mut self,
+        f: &File,
+        mut count: usize,
+        mut off: u64,
+        flags: Option<oslib::ReadvFlags>,
+    ) -> io::Result<usize> {
         let start = off;
         while count > 0 {
-            let read = self.0.read_from_file_at(f, count, off)?;
+            let read = self.0.read_from_file_at(f, count, off, flags)?;
             if read == 0 {
                 break;
             }

@@ -1816,7 +1816,7 @@ impl FileSystem for PassthroughFs {
         // This is safe because read_from_file_at uses preadv64, so the underlying file descriptor
         // offset is not affected by this operation.
         let f = data.file.get()?.read().unwrap();
-        w.read_from_file_at(f.get_file(), size as usize, offset)
+        w.read_from_file_at(f.get_file(), size as usize, offset, None)
     }
 
     fn write<R: ZeroCopyReader>(

@@ -383,9 +383,11 @@ impl<'a, B: Bitmap + BitmapSlice + 'static> Writer<'a, B> {
         src: F,
         count: usize,
         off: u64,
+        flags: Option<oslib::ReadvFlags>,
     ) -> io::Result<usize> {
-        self.buffer
-            .consume(count, |bufs| src.read_vectored_at_volatile(bufs, off))
+        self.buffer.consume(count, |bufs| {
+            src.read_vectored_at_volatile(bufs, off, flags)
+        })
     }
 
     /// Returns number of bytes already written to the descriptor chain buffer.

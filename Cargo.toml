@@ -28,7 +28,7 @@ btree-range-map = "0.7"
 capng = "0.2.2"
 env_logger = "0.8.4"
 futures = { version = "0.3", features = ["thread-pool"] }
-libc = "0.2.155"
+libc = "0.2.177"
 log = "0.4"
 libseccomp-sys = { version = "0.2", optional = true }
 clap = { version = "4", features = ["derive"] }
