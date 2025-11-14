@@ -155,6 +155,7 @@ pub fn enable_seccomp(action: SeccompAction, allow_remote_logging: bool) -> Resu
     allow_syscall!(ctx, libc::SYS_preadv);
     allow_syscall!(ctx, libc::SYS_pread64);
     allow_syscall!(ctx, libc::SYS_preadv2);
+    allow_syscall!(ctx, libc::SYS_pwritev);
     allow_syscall!(ctx, libc::SYS_pwritev2);
     allow_syscall!(ctx, libc::SYS_pwrite64);
     allow_syscall!(ctx, libc::SYS_read);
