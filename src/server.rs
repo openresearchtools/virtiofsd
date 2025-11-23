@@ -1693,17 +1693,31 @@ fn parse_security_context(nr_secctx: u32, data: &[u8]) -> Result<Option<SecConte
     Ok(Some(fuse_secctx))
 }
 
-fn parse_sup_groups(data: &[u8]) -> Result<GuestGid> {
-    let (group_header, group_id_bytes) = take_object::<SuppGroups>(data)?;
+fn parse_sup_groups(data: &[u8]) -> Result<Vec<GuestGid>> {
+    const LINUX_NRGROUPS_MAX: u32 = 65536;
 
-    // The FUSE extension allows sending several group IDs, but currently the guest
-    // kernel only sends one.
-    if group_header.nr_groups != 1 {
+    let (group_header, mut group_id_bytes) = take_object::<SuppGroups>(data)?;
+
+    // Keep in mind that extensions are padded to 8 bytes
+    // related functions in the kernel
+    // `get_create_supp_group` and `fuse_ext_size` in fs/fuse/dir.c
+    // `FUSE_REC_ALIGN` in include/uapi/linux/fuse.h
+    if group_header.nr_groups > LINUX_NRGROUPS_MAX
+        || data.len()
+            != (size_of::<SuppGroups>() + size_of::<u32>() * group_header.nr_groups as usize)
+                .next_multiple_of(8)
+    {
         return Err(Error::DecodeMessage(einval()));
     }
 
-    let (gid, _) = take_object::<u32>(group_id_bytes)?;
-    Ok(gid.into())
+    let mut groups = Vec::with_capacity(group_header.nr_groups as _);
+    while groups.len() < group_header.nr_groups as usize {
+        let gid;
+        (gid, group_id_bytes) = take_object::<u32>(group_id_bytes)?;
+        groups.push(gid.into());
+    }
+
+    Ok(groups)
 }
 
 fn get_extensions(options: FsOptions, skip: usize, request_bytes: &[u8]) -> Result<Extensions> {
@@ -1749,12 +1763,14 @@ fn get_extensions(options: FsOptions, skip: usize, request_bytes: &[u8]) -> Resu
                 debug!("Extension received: {nr_secctx} SecCtx");
             }
             ExtType::SupGroups => {
-                if !options.contains(FsOptions::CREATE_SUPP_GROUP) || extensions.sup_gid.is_some() {
+                if !options.contains(FsOptions::CREATE_SUPP_GROUP)
+                    || !extensions.sup_gids.is_empty()
+                {
                     return Err(Error::DecodeMessage(einval()));
                 }
 
-                extensions.sup_gid = parse_sup_groups(current_extension_bytes)?.into();
-                debug!("Extension received: SupGroups({:?})", extensions.sup_gid);
+                extensions.sup_gids = parse_sup_groups(current_extension_bytes)?;
+                debug!("Extension received: SupGroups({:?})", extensions.sup_gids);
             }
         }
 

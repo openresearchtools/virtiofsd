@@ -1467,13 +1467,14 @@ impl PassthroughFs {
     ) -> io::Result<Option<UnixCredentialsGuard>> {
         let host_uid = self.map_guest_uid(ctx.uid)?;
         let host_gid = self.map_guest_gid(ctx.gid)?;
-        let supp_gid = extensions
-            .sup_gid
-            .map(|gid| self.map_guest_gid(gid))
-            .transpose()?;
+        let supp_gids = extensions
+            .sup_gids
+            .iter()
+            .map(|gid| self.map_guest_gid(*gid))
+            .collect::<io::Result<_>>()?;
 
         UnixCredentials::new(host_uid, host_gid)
-            .supplementary_gid(self.sup_group_extension.load(Ordering::Relaxed), supp_gid)
+            .supplementary_gid(self.sup_group_extension.load(Ordering::Relaxed), supp_gids)
             .set()
     }
 
