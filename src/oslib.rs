@@ -189,6 +189,60 @@ pub fn openat(dir: &impl AsRawFd, pathname: &CStr, flags: i32, mode: Option<u32>
     })
 }
 
+/// Safe wrapper around `open_tree(2)`.
+///
+/// # Errors
+///
+/// Will return `Err(errno)` if `open_tree(2)` fails,
+/// see `open_tree(2)` for details.
+pub fn open_tree(dir: Option<&dyn AsRawFd>, pathname: &CStr, flags: u32) -> Result<RawFd> {
+    let fd = dir.map(AsRawFd::as_raw_fd).unwrap_or(libc::AT_FDCWD);
+
+    // SAFETY: `libc::syscall` is called with the correct arity and types.
+    // `pathname` points to a valid NUL-terminated string.
+    // `fd` is guaranteed to be a valid file descriptor or AT_FDCWD.
+    check_retval(
+        unsafe { libc::syscall(libc::SYS_open_tree, fd, pathname.as_ptr(), flags) } as RawFd,
+    )
+}
+
+// libc does not define this on musl.
+// https://github.com/rust-lang/libc/pull/3534#discussion_r2573036200
+pub const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x00000004;
+
+/// Safe wrapper around `move_mount(2)`.
+///
+/// # Errors
+///
+/// Will return `Err(errno)` if `move_mount(2)` fails,
+/// see `move_mount(2)` for details.
+pub fn move_mount(
+    from_dir: Option<&dyn AsRawFd>,
+    from_path: &CStr,
+    to_dir: Option<&dyn AsRawFd>,
+    to_path: &CStr,
+    flags: u32,
+) -> Result<()> {
+    let from_fd = from_dir.map(AsRawFd::as_raw_fd).unwrap_or(libc::AT_FDCWD);
+    let to_fd = to_dir.map(AsRawFd::as_raw_fd).unwrap_or(libc::AT_FDCWD);
+
+    // SAFETY: `libc::syscall` is called with the correct arity and types.
+    // `from_path` and `to_path` point to valid NUL-terminated strings.
+    // `from_fd` and `to_fd` are guaranteed to be valid file descirptors or AT_FDCWD.
+    check_retval(unsafe {
+        libc::syscall(
+            libc::SYS_move_mount,
+            from_fd,
+            from_path.as_ptr(),
+            to_fd,
+            to_path.as_ptr(),
+            flags,
+        )
+    })?;
+
+    Ok(())
+}
+
 /// An utility function that uses `openat2(2)` to restrict the how the provided pathname
 /// is resolved. It uses the following flags:
 /// - `RESOLVE_IN_ROOT`: Treat the directory referred to by dirfd as the root directory while

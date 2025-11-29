@@ -236,12 +236,23 @@ impl Sandbox {
         // Safe because we just opened this fd.
         self.proc_self_fd = Some(unsafe { File::from_raw_fd(proc_self_fd) });
 
-        // Bind-mount `self.shared_dir` on itself so we can use as new root on `pivot_root` syscall.
-        oslib::mount(
-            self.shared_dir.as_str().into(),
-            self.shared_dir.as_str(),
+        let c_shared_dir = CString::new(self.shared_dir.clone()).unwrap();
+
+        let newroot = oslib::open_tree(
             None,
-            libc::MS_BIND | libc::MS_REC,
+            &c_shared_dir,
+            libc::AT_RECURSIVE as libc::c_uint | libc::OPEN_TREE_CLONE | libc::OPEN_TREE_CLOEXEC,
+        )
+        // SAFETY: we just opened this fd.
+        .map(|fd| unsafe { File::from_raw_fd(fd) })
+        .map_err(Error::OpenNewRoot)?;
+
+        oslib::move_mount(
+            Some(&newroot),
+            &CString::default(),
+            None,
+            &c_shared_dir,
+            oslib::MOVE_MOUNT_F_EMPTY_PATH,
         )
         .map_err(Error::BindMountSharedDir)?;
 
@@ -257,24 +268,12 @@ impl Sandbox {
             return Err(Error::OpenOldRoot(std::io::Error::last_os_error()));
         }
 
-        // Get a file descriptor to the new root so we can reference it after switching root.
-        let c_shared_dir = CString::new(self.shared_dir.clone()).unwrap();
-        let newroot_fd = unsafe {
-            libc::open(
-                c_shared_dir.as_ptr(),
-                libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC,
-            )
-        };
-        if newroot_fd < 0 {
-            return Err(Error::OpenNewRoot(std::io::Error::last_os_error()));
-        }
-
         // Change to new root directory to prepare for `pivot_root` syscall.
-        oslib::fchdir(newroot_fd).map_err(Error::ChdirNewRoot)?;
+        oslib::fchdir(newroot.as_raw_fd()).map_err(Error::ChdirNewRoot)?;
 
         // Check if we are supposed to switch to our current rootfs
         let old_st = passthrough::statx(&oldroot_fd, None).map_err(Error::StatOldRoot)?;
-        let new_st = passthrough::statx(&newroot_fd, None).map_err(Error::StatNewRoot)?;
+        let new_st = passthrough::statx(&newroot, None).map_err(Error::StatNewRoot)?;
         let switch_to_current_rootfs = (old_st.mnt_id == new_st.mnt_id)
             && (old_st.st.st_dev == new_st.st.st_dev)
             && (old_st.st.st_ino == new_st.st.st_ino);
@@ -304,11 +303,10 @@ impl Sandbox {
             oslib::umount2(".", libc::MNT_DETACH).map_err(Error::UmountOldRoot)?;
 
             // Change to new root.
-            oslib::fchdir(newroot_fd).map_err(Error::ChdirNewRoot)?;
+            oslib::fchdir(newroot.as_raw_fd()).map_err(Error::ChdirNewRoot)?;
         }
 
-        // We no longer need these file descriptors, so close them.
-        unsafe { libc::close(newroot_fd) };
+        // We no longer need this file descriptor, so close it.
         unsafe { libc::close(oldroot_fd) };
 
         // Open `/proc/self/mountinfo` now
