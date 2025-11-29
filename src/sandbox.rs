@@ -170,20 +170,15 @@ impl Sandbox {
         sandbox_mode: SandboxMode,
         uid_map: Vec<UidMap>,
         gid_map: Vec<GidMap>,
-    ) -> io::Result<Self> {
-        let shared_dir_rp = fs::canonicalize(shared_dir)?;
-        let shared_dir_rp_str = shared_dir_rp
-            .to_str()
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
-
-        Ok(Sandbox {
-            shared_dir: shared_dir_rp_str.into(),
+    ) -> Self {
+        Sandbox {
+            shared_dir,
             proc_self_fd: None,
             mountinfo_fd: None,
             sandbox_mode,
             uid_map,
             gid_map,
-        })
+        }
     }
 
     // Make `self.shared_dir` our root directory, and get isolated file descriptors for
@@ -679,10 +674,16 @@ impl Sandbox {
 
     /// Return the prefix to strip from /proc/self/mountinfo entries to get paths that are actually
     /// accessible in our sandbox
-    pub fn get_mountinfo_prefix(&self) -> Option<String> {
+    pub fn get_mountinfo_prefix(&self) -> io::Result<Option<String>> {
         match self.sandbox_mode {
-            SandboxMode::Namespace | SandboxMode::None => None,
-            SandboxMode::Chroot => Some(self.shared_dir.clone()),
+            SandboxMode::Namespace | SandboxMode::None => Ok(None),
+            SandboxMode::Chroot => {
+                let prefix = fs::canonicalize(&self.shared_dir)?
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+                Ok(Some(prefix))
+            }
         }
     }
 }

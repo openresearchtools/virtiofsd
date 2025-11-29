@@ -806,9 +806,10 @@ fn main() {
         opt.sandbox,
         opt.uid_map,
         opt.gid_map,
-    )
-    .unwrap_or_else(|error| {
-        error!("Error creating sandbox: {error}");
+    );
+
+    let mountinfo_prefix = sandbox.get_mountinfo_prefix().unwrap_or_else(|error| {
+        error!("Error getting mountinfo prefix: {error}");
         process::exit(1)
     });
 
@@ -824,7 +825,7 @@ fn main() {
         attr_timeout: timeout,
         cache_policy: opt.cache,
         root_dir: sandbox.get_root_dir(),
-        mountinfo_prefix: sandbox.get_mountinfo_prefix(),
+        mountinfo_prefix,
         xattr,
         xattrmap,
         proc_sfd_rawfd: sandbox.get_proc_self_fd(),
