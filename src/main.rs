@@ -881,7 +881,7 @@ fn main() {
 // Use a generic function for the main loop so we don't need to use Box<dyn FileSystem>
 fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static>(
     fs: F,
-    listener: Listener,
+    mut listener: Listener,
     thread_pool_size: usize,
     tag: Option<String>,
 ) {
@@ -905,7 +905,7 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
 
     info!("Waiting for vhost-user socket connection...");
 
-    if let Err(e) = daemon.start(listener) {
+    if let Err(e) = daemon.start(&mut listener) {
         error!("Failed to start daemon: {e:?}");
         process::exit(1);
     }
