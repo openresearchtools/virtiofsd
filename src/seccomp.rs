@@ -138,7 +138,7 @@ pub fn enable_seccomp(action: SeccompAction, allow_remote_logging: bool) -> Resu
     allow_syscall!(ctx, libc::SYS_mremap);
     allow_syscall!(ctx, libc::SYS_munmap);
     allow_syscall!(ctx, libc::SYS_name_to_handle_at);
-    #[cfg(not(target_arch = "loongarch64"))]
+    #[cfg(not(any(target_arch = "loongarch64", target_arch = "sparc64")))]
     allow_syscall!(ctx, libc::SYS_newfstatat);
     #[cfg(target_arch = "powerpc64")]
     allow_syscall!(ctx, libc::SYS__llseek);
