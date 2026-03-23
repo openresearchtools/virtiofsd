@@ -8,7 +8,7 @@ use std::io;
 pub struct UnixCredentials {
     uid: HostUid,
     gid: HostGid,
-    sup_gid: Option<HostGid>,
+    sup_gids: Vec<HostGid>,
     keep_capability: bool,
 }
 
@@ -17,19 +17,19 @@ impl UnixCredentials {
         UnixCredentials {
             uid,
             gid,
-            sup_gid: None,
+            sup_gids: vec![],
             keep_capability: false,
         }
     }
 
-    /// Set a supplementary group. Set `supported_extension` to `false` to signal that a
-    /// supplementary group maybe required, but the guest was not able to tell us which,
+    /// Set supplementary groups. Set `supported_extension` to `false` to signal that
+    /// supplementary groups may be required, but the guest was not able to tell us which,
     /// so we have to rely on keeping the DAC_OVERRIDE capability.
-    pub fn supplementary_gid(self, supported_extension: bool, sup_gid: Option<HostGid>) -> Self {
+    pub fn supplementary_gid(self, supported_extension: bool, sup_gids: Vec<HostGid>) -> Self {
         UnixCredentials {
             uid: self.uid,
             gid: self.gid,
-            sup_gid,
+            sup_gids,
             keep_capability: !supported_extension,
         }
     }
@@ -49,8 +49,8 @@ impl UnixCredentials {
         // We have to change the gid before we change the uid because if we
         // change the uid first then we lose the capability to change the gid.
         // However changing back can happen in any order.
-        if let Some(sup_gid) = self.sup_gid {
-            oslib::setsupgroup(sup_gid)?;
+        if !self.sup_gids.is_empty() {
+            oslib::setsupgroup(&self.sup_gids)?;
         }
 
         if change_gid {
@@ -80,7 +80,7 @@ impl UnixCredentials {
         Ok(Some(UnixCredentialsGuard {
             reset_uid: change_uid.then_some(current_uid),
             reset_gid: change_gid.then_some(current_gid),
-            drop_sup_gid: self.sup_gid.is_some(),
+            drop_sup_gid: !self.sup_gids.is_empty(),
         }))
     }
 }
