@@ -134,7 +134,11 @@ impl<'a> InodeData {
         match &self.file_or_handle {
             FileOrHandle::File(f) => Ok(InodeFile::Ref(f.get_file())),
             FileOrHandle::Handle(h) => {
-                let file = h.open(libc::O_PATH)?;
+                #[cfg(target_os = "linux")]
+                let o_path_flag = libc::O_PATH;
+                #[cfg(target_os = "macos")]
+                let o_path_flag = libc::O_RDONLY; // O_PATH not available on macOS
+                let file = h.open(o_path_flag)?;
                 Ok(InodeFile::Owned(file))
             }
             FileOrHandle::Invalid(err) => Err(io::Error::new(

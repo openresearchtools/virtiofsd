@@ -235,7 +235,12 @@ impl<'a> Constructor<'a> {
         let path_fd = {
             let fd = self
                 .fs
-                .open_relative_to(parent_fd, name, libc::O_PATH, None)?;
+                .open_relative_to(parent_fd, name, {
+                    #[cfg(target_os = "linux")]
+                    { libc::O_PATH }
+                    #[cfg(target_os = "macos")]
+                    { libc::O_RDONLY }
+                }, None)?;
             unsafe { File::from_raw_fd(fd) }
         };
         let stat = statx(&path_fd, None)?;

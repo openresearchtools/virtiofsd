@@ -11,6 +11,7 @@ use std::os::unix::io::AsRawFd;
 
 use vm_memory::ByteValued;
 
+#[cfg(target_os = "linux")]
 #[repr(C, packed)]
 #[derive(Default, Clone, Copy)]
 struct LinuxDirent64 {
@@ -19,7 +20,41 @@ struct LinuxDirent64 {
     d_reclen: libc::c_ushort,
     d_ty: libc::c_uchar,
 }
+#[cfg(target_os = "linux")]
 unsafe impl ByteValued for LinuxDirent64 {}
+
+/// macOS dirent structure for getdirentries.
+/// On macOS, struct dirent has: d_fileno (ino_t), d_seekoff (u64), d_reclen (u16),
+/// d_namlen (u16), d_type (u8), then d_name[].
+// TODO(macos): The macOS dirent layout varies by version. This targets macOS 10.15+.
+// On older macOS, the layout may differ. Also, d_seekoff is macOS-specific.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MacDirent {
+    d_ino: libc::ino_t,
+    d_seekoff: u64,
+    d_reclen: u16,
+    d_namlen: u16,
+    d_type: u8,
+    // d_name follows (variable length)
+}
+
+#[cfg(target_os = "macos")]
+impl Default for MacDirent {
+    fn default() -> Self {
+        MacDirent {
+            d_ino: 0,
+            d_seekoff: 0,
+            d_reclen: 0,
+            d_namlen: 0,
+            d_type: 0,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe impl ByteValued for MacDirent {}
 
 #[derive(Default)]
 pub struct ReadDir<P> {
@@ -28,6 +63,7 @@ pub struct ReadDir<P> {
     end: usize,
 }
 
+#[cfg(target_os = "linux")]
 impl<P: DerefMut<Target = [u8]>> ReadDir<P> {
     pub fn new<D: AsRawFd>(dir: &D, offset: libc::off64_t, buf: P) -> io::Result<Self> {
         // Safe because this doesn't modify any memory and we check the return value.
@@ -68,6 +104,55 @@ impl<P: DerefMut<Target = [u8]>> ReadDir<P> {
     }
 }
 
+/// macOS: Use __getdirentries64 to read directory entries.
+// TODO(macos): __getdirentries64 is a private API on macOS. A more portable
+// approach would be to use fdopendir/readdir_r, but that doesn't fit the
+// buffer-based API as cleanly.
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn __getdirentries64(
+        fd: libc::c_int,
+        buf: *mut libc::c_char,
+        bufsize: libc::size_t,
+        basep: *mut libc::off_t,
+    ) -> libc::ssize_t;
+}
+
+#[cfg(target_os = "macos")]
+impl<P: DerefMut<Target = [u8]>> ReadDir<P> {
+    pub fn new<D: AsRawFd>(dir: &D, offset: libc::off64_t, buf: P) -> io::Result<Self> {
+        let res = unsafe { libc::lseek(dir.as_raw_fd(), offset as libc::off_t, libc::SEEK_SET) };
+        if res < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        unsafe { Self::new_no_seek(dir, buf) }
+    }
+
+    /// # Safety
+    /// Caller must ensure the current position is valid.
+    pub unsafe fn new_no_seek<D: AsRawFd>(dir: &D, mut buf: P) -> io::Result<Self> {
+        let mut basep: libc::off_t = 0;
+        let res = unsafe {
+            __getdirentries64(
+                dir.as_raw_fd(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut basep,
+            )
+        };
+        if res < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(ReadDir {
+            buf,
+            current: 0,
+            end: res as usize,
+        })
+    }
+}
+
 impl<P> ReadDir<P> {
     /// Returns the number of bytes from the internal buffer that have not yet been consumed.
     pub fn remaining(&self) -> usize {
@@ -75,6 +160,7 @@ impl<P> ReadDir<P> {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
     fn next(&mut self) -> Option<DirEntry<'_>> {
         let rem = &self.buf[self.current..self.end];
@@ -112,6 +198,52 @@ impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
             "rem is smaller than `d_reclen`"
         );
         self.current += dirent64.d_reclen as usize;
+
+        Some(entry)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
+    fn next(&mut self) -> Option<DirEntry<'_>> {
+        let rem = &self.buf[self.current..self.end];
+        if rem.is_empty() || rem.len() < size_of::<MacDirent>() {
+            return None;
+        }
+
+        // Read the fixed-size header
+        let header = unsafe {
+            std::ptr::read_unaligned(rem.as_ptr() as *const MacDirent)
+        };
+
+        if header.d_reclen == 0 || (header.d_reclen as usize) > rem.len() {
+            return None;
+        }
+
+        // Name starts after the fixed header
+        let name_start = size_of::<MacDirent>();
+        let name_end = name_start + header.d_namlen as usize;
+        if name_end > rem.len() {
+            return None;
+        }
+
+        // Need to include the NUL byte
+        let name_with_nul = if name_end < rem.len() && rem[name_end] == 0 {
+            &rem[name_start..=name_end]
+        } else {
+            // Should not happen but be safe
+            &rem[name_start..name_end]
+        };
+
+        let name = strip_padding(name_with_nul);
+        let entry = DirEntry {
+            ino: header.d_ino,
+            offset: header.d_seekoff,
+            type_: header.d_type as u32,
+            name,
+        };
+
+        self.current += header.d_reclen as usize;
 
         Some(entry)
     }

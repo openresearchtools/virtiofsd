@@ -59,7 +59,11 @@ impl PassthroughFsRo {
 
         // `O_PATH` ignores all flags but `O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW`, just allow it
         // wholesale
-        if cflags & libc::O_PATH != 0 {
+        #[cfg(target_os = "linux")]
+        let o_path = libc::O_PATH;
+        #[cfg(target_os = "macos")]
+        let o_path = libc::O_RDONLY; // O_PATH not available on macOS
+        if cflags & o_path != 0 {
             return open_fn(flags);
         }
 

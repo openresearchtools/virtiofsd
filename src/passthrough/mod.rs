@@ -50,6 +50,19 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use xattrmap::{AppliedRule, XattrMap};
 
+/// macOS does not have O_PATH. We define a compatibility constant that uses
+/// O_RDONLY as a fallback. This means "O_PATH" fds on macOS will actually be
+/// readable fds, which changes some semantics (e.g., they count against open
+/// file limits differently), but allows the code to compile and mostly function.
+// TODO(macos): O_RDONLY is not a perfect substitute for O_PATH. On Linux,
+// O_PATH fds cannot be used for read/write and have minimal overhead. On macOS,
+// using O_RDONLY means we get a fully open fd. Some operations that check for
+// O_PATH behavior may need additional macOS-specific handling.
+#[cfg(target_os = "macos")]
+const O_PATH_OR_RDONLY: i32 = libc::O_RDONLY;
+#[cfg(target_os = "linux")]
+const O_PATH_OR_RDONLY: i32 = libc::O_PATH;
+
 const EMPTY_CSTR: &[u8] = b"\0";
 
 type Handle = u64;
@@ -501,14 +514,14 @@ impl PassthroughFs {
             openat_verbose(
                 &libc::AT_FDCWD,
                 "/proc/self/fd",
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                O_PATH_OR_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )?
         };
 
         let orig_wd_fd = openat_verbose(
             &libc::AT_FDCWD,
             ".",
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            O_PATH_OR_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )?;
 
         let mount_fds = if cfg.inode_file_handles == InodeFileHandlesMode::Never
@@ -757,13 +770,13 @@ impl PassthroughFs {
         let root_dir = openat_verbose(
             &libc::AT_FDCWD,
             self.cfg.root_dir.as_str(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            O_PATH_OR_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )?;
 
         let st = statx(&root_dir, None)?;
         if let Some(h) = self.get_file_handle_opt(&root_dir, &st)? {
             // Got an openable file handle, try opening it
-            match self.make_file_handle_openable(&h)?.open(libc::O_PATH) {
+            match self.make_file_handle_openable(&h)?.open(O_PATH_OR_RDONLY) {
                 Ok(_) => (),
                 Err(e) => match self.cfg.inode_file_handles {
                     InodeFileHandlesMode::Never => unreachable!(),
@@ -818,7 +831,7 @@ impl PassthroughFs {
         let p_file = parent_data.get_file()?;
 
         let path_fd = {
-            let fd = self.open_relative_to(&p_file, name, libc::O_PATH, None)?;
+            let fd = self.open_relative_to(&p_file, name, O_PATH_OR_RDONLY, None)?;
             // Safe because we just opened this fd.
             unsafe { File::from_raw_fd(fd) }
         };
@@ -1223,7 +1236,7 @@ impl PassthroughFs {
         // setting xattr as well.
 
         // Open O_PATH fd for dir/symlink/special node just created.
-        let path_fd = self.open_relative_to(parent_file, name, libc::O_PATH, None)?;
+        let path_fd = self.open_relative_to(parent_file, name, O_PATH_OR_RDONLY, None)?;
 
         let procname = CString::new(format!("{path_fd}"))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
@@ -1265,7 +1278,7 @@ impl PassthroughFs {
         let path_fd = openat(
             &libc::AT_FDCWD,
             self.cfg.root_dir.as_str(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            O_PATH_OR_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )?;
 
         let st = statx(&path_fd, None)?;
@@ -1944,6 +1957,7 @@ impl FileSystem for PassthroughFs {
             let empty = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
 
             // Safe because this doesn't modify any memory and we check the return value.
+            #[cfg(target_os = "linux")]
             let res = unsafe {
                 libc::fchownat(
                     inode_file.as_raw_fd(),
@@ -1952,6 +1966,11 @@ impl FileSystem for PassthroughFs {
                     gid,
                     libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
                 )
+            };
+            // macOS: AT_EMPTY_PATH is not available. Use fchown directly on the fd.
+            #[cfg(target_os = "macos")]
+            let res = unsafe {
+                libc::fchown(inode_file.as_raw_fd(), uid, gid)
             };
             if res < 0 {
                 return Err(io::Error::last_os_error());
@@ -2042,17 +2061,64 @@ impl FileSystem for PassthroughFs {
 
         let invalidated_inode = self.before_invalidating_path(&new_inode, newname);
         // Safe because this doesn't modify any memory and we check the return value.
-        // TODO: Switch to libc::renameat2 once https://github.com/rust-lang/libc/pull/1508 lands
-        // and we have glibc 2.28.
-        let res = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                old_file.as_raw_fd(),
-                oldname.as_ptr(),
-                new_file.as_raw_fd(),
-                newname.as_ptr(),
-                flags,
-            )
+        #[cfg(target_os = "linux")]
+        let res = {
+            // TODO: Switch to libc::renameat2 once https://github.com/rust-lang/libc/pull/1508
+            // lands and we have glibc 2.28.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    old_file.as_raw_fd(),
+                    oldname.as_ptr(),
+                    new_file.as_raw_fd(),
+                    newname.as_ptr(),
+                    flags,
+                )
+            }
+        };
+        // macOS: renameat2 is not available. Use renameatx_np with RENAME_EXCL for
+        // RENAME_NOREPLACE, or plain renameat for flags == 0.
+        // TODO(macos): RENAME_EXCHANGE and RENAME_WHITEOUT are not supported on macOS.
+        #[cfg(target_os = "macos")]
+        let res = {
+            // FUSE sends Linux rename flags: RENAME_NOREPLACE=1, RENAME_EXCHANGE=2
+            const LINUX_RENAME_NOREPLACE: u32 = 1;
+            const LINUX_RENAME_EXCHANGE: u32 = 2;
+            if flags == 0 {
+                unsafe {
+                    libc::renameat(
+                        old_file.as_raw_fd(),
+                        oldname.as_ptr(),
+                        new_file.as_raw_fd(),
+                        newname.as_ptr(),
+                    ) as libc::c_long
+                }
+            } else if flags == LINUX_RENAME_NOREPLACE {
+                // Map Linux RENAME_NOREPLACE to macOS RENAME_EXCL via renameatx_np
+                unsafe {
+                    libc::renameatx_np(
+                        old_file.as_raw_fd(),
+                        oldname.as_ptr(),
+                        new_file.as_raw_fd(),
+                        newname.as_ptr(),
+                        libc::RENAME_EXCL as libc::c_uint,
+                    ) as libc::c_long
+                }
+            } else if flags == LINUX_RENAME_EXCHANGE {
+                // Map Linux RENAME_EXCHANGE to macOS RENAME_SWAP via renameatx_np
+                unsafe {
+                    libc::renameatx_np(
+                        old_file.as_raw_fd(),
+                        oldname.as_ptr(),
+                        new_file.as_raw_fd(),
+                        newname.as_ptr(),
+                        libc::RENAME_SWAP as libc::c_uint,
+                    ) as libc::c_long
+                }
+            } else {
+                // Unsupported flags (e.g., RENAME_WHITEOUT)
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
         };
         if let Some(invalidated_inode) = invalidated_inode {
             self.after_invalidating_path(invalidated_inode, "Overwrote (via rename)");
@@ -2575,18 +2641,54 @@ impl FileSystem for PassthroughFs {
 
         let fd = data.file.get()?.write().unwrap().as_raw_fd();
         // Safe because this doesn't modify any memory and we check the return value.
-        let res = unsafe {
-            libc::fallocate64(
-                fd,
-                mode as libc::c_int,
-                offset as libc::off64_t,
-                length as libc::off64_t,
-            )
-        };
-        if res == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
+        #[cfg(target_os = "linux")]
+        {
+            let res = unsafe {
+                libc::fallocate64(
+                    fd,
+                    mode as libc::c_int,
+                    offset as libc::off64_t,
+                    length as libc::off64_t,
+                )
+            };
+            if res == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        // macOS: fallocate is not available. Use fcntl(F_PREALLOCATE) + ftruncate.
+        // TODO(macos): This only supports mode 0 (default allocation). Modes like
+        // FALLOC_FL_PUNCH_HOLE, FALLOC_FL_COLLAPSE_RANGE, etc. are not supported.
+        #[cfg(target_os = "macos")]
+        {
+            if mode != 0 {
+                return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+            }
+            let mut fstore = libc::fstore_t {
+                fst_flags: libc::F_ALLOCATECONTIG as libc::c_uint,
+                fst_posmode: libc::F_PEOFPOSMODE as libc::c_int,
+                fst_offset: offset as libc::off_t,
+                fst_length: length as libc::off_t,
+                fst_bytesalloc: 0,
+            };
+            let mut res = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fstore) };
+            if res == -1 {
+                // Try non-contiguous allocation
+                fstore.fst_flags = libc::F_ALLOCATEALL as libc::c_uint;
+                res = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fstore) };
+            }
+            if res == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // Extend the file size if needed
+            let new_size = offset + length;
+            let res = unsafe { libc::ftruncate(fd, new_size as libc::off_t) };
+            if res == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
         }
     }
 
@@ -2635,21 +2737,73 @@ impl FileSystem for PassthroughFs {
 
         // Safe because this will only modify `offset_in` and `offset_out` and we check
         // the return value.
-        let res = unsafe {
-            libc::syscall(
-                libc::SYS_copy_file_range,
-                fd_in,
-                &mut (offset_in as i64) as &mut _ as *mut _,
-                fd_out,
-                &mut (offset_out as i64) as &mut _ as *mut _,
-                len,
-                flags,
-            )
-        };
-        if res < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(res as usize)
+        #[cfg(target_os = "linux")]
+        {
+            let res = unsafe {
+                libc::syscall(
+                    libc::SYS_copy_file_range,
+                    fd_in,
+                    &mut (offset_in as i64) as &mut _ as *mut _,
+                    fd_out,
+                    &mut (offset_out as i64) as &mut _ as *mut _,
+                    len,
+                    flags,
+                )
+            };
+            if res < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(res as usize)
+            }
+        }
+        // macOS: copy_file_range is not available. Fall back to userspace read/write copy.
+        // TODO(macos): This is significantly less efficient than copy_file_range.
+        // macOS 10.12+ has clonefile/fcopyfile but they don't work on arbitrary fd offsets.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = flags; // unused on macOS
+            let mut buf = vec![0u8; std::cmp::min(len as usize, 1024 * 1024)];
+            let mut off_in = offset_in as libc::off_t;
+            let mut off_out = offset_out as libc::off_t;
+            let mut total: usize = 0;
+            let mut remaining = len as usize;
+
+            while remaining > 0 {
+                let to_read = std::cmp::min(remaining, buf.len());
+                let n_read = unsafe {
+                    libc::pread(fd_in, buf.as_mut_ptr() as *mut libc::c_void, to_read, off_in)
+                };
+                if n_read < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if n_read == 0 {
+                    break; // EOF
+                }
+                let n_read = n_read as usize;
+
+                let mut written = 0;
+                while written < n_read {
+                    let n_written = unsafe {
+                        libc::pwrite(
+                            fd_out,
+                            buf[written..].as_ptr() as *const libc::c_void,
+                            n_read - written,
+                            off_out + written as libc::off_t,
+                        )
+                    };
+                    if n_written < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    written += n_written as usize;
+                }
+
+                off_in += n_read as libc::off_t;
+                off_out += n_read as libc::off_t;
+                total += n_read;
+                remaining -= n_read;
+            }
+
+            Ok(total)
         }
     }
 
@@ -2659,7 +2813,12 @@ impl FileSystem for PassthroughFs {
         let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NOFOLLOW)?;
         let raw_fd = file.as_raw_fd();
         debug!("syncfs: inode={inode}, mount_fd={raw_fd}");
+        #[cfg(target_os = "linux")]
         let ret = unsafe { libc::syncfs(raw_fd) };
+        // macOS: syncfs() is not available. Use fcntl(F_FULLFSYNC) which flushes
+        // all data to the physical device for the given fd.
+        #[cfg(target_os = "macos")]
+        let ret = unsafe { libc::fcntl(raw_fd, libc::F_FULLFSYNC) };
         if ret != 0 {
             // Thread-safe, because errno is stored in thread-local storage.
             Err(io::Error::last_os_error())

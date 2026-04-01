@@ -507,8 +507,18 @@ impl<F: FileSystem + Sync> Server<F> {
     fn rename2(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
         let Rename2In { newdir, flags, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
 
+        // FUSE rename flags use Linux kernel values. Define compat constants for macOS.
+        #[cfg(target_os = "linux")]
         let flags =
             flags & (libc::RENAME_EXCHANGE | libc::RENAME_NOREPLACE | libc::RENAME_WHITEOUT);
+        #[cfg(target_os = "macos")]
+        let flags = {
+            // Linux constants: RENAME_NOREPLACE=1, RENAME_EXCHANGE=2, RENAME_WHITEOUT=4
+            const LINUX_RENAME_NOREPLACE: u32 = 1;
+            const LINUX_RENAME_EXCHANGE: u32 = 2;
+            const LINUX_RENAME_WHITEOUT: u32 = 4;
+            flags & (LINUX_RENAME_NOREPLACE | LINUX_RENAME_EXCHANGE | LINUX_RENAME_WHITEOUT)
+        };
 
         self.do_rename(in_header, size_of::<Rename2In>(), newdir, flags, r, w)
     }

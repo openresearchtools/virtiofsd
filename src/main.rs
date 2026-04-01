@@ -553,6 +553,7 @@ fn set_signal_handlers() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn parse_modcaps(
     default_caps: Vec<&str>,
     modcaps: Option<String>,
@@ -593,6 +594,7 @@ fn parse_modcaps(
     (required_caps, disabled_caps)
 }
 
+#[cfg(target_os = "linux")]
 fn drop_capabilities(inode_file_handles: InodeFileHandlesMode, modcaps: Option<String>) {
     let default_caps = vec![
         "CHOWN",
@@ -851,6 +853,8 @@ fn main() {
     };
 
     // Must happen before we start the thread pool
+    // seccomp is Linux-only
+    #[cfg(target_os = "linux")]
     match opt.seccomp {
         SeccompAction::Allow => {}
         _ => enable_seccomp(opt.seccomp, opt.syslog).unwrap(),
@@ -858,9 +862,13 @@ fn main() {
 
     // We don't modify the capabilities if the user call us without
     // any sandbox (i.e. --sandbox=none) as unprivileged user
-    let uid = unsafe { libc::geteuid() };
-    if uid == 0 {
-        drop_capabilities(fs_cfg.inode_file_handles, opt.modcaps);
+    // Capabilities are Linux-only
+    #[cfg(target_os = "linux")]
+    {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            drop_capabilities(fs_cfg.inode_file_handles, opt.modcaps);
+        }
     }
 
     if opt.readonly {

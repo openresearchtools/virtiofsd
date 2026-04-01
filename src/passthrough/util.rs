@@ -38,6 +38,7 @@ pub fn openat_verbose(dir_fd: &impl AsRawFd, path: &str, flags: libc::c_int) -> 
 
 /// Open `/proc/self/fd/{fd}` with the given flags to effectively duplicate the given `fd` with new
 /// flags (e.g. to turn an `O_PATH` file descriptor into one that can be used for I/O).
+#[cfg(target_os = "linux")]
 pub fn reopen_fd_through_proc(
     fd: &impl AsRawFd,
     flags: libc::c_int,
@@ -50,6 +51,32 @@ pub fn reopen_fd_through_proc(
         format!("{}", fd.as_raw_fd()).as_str(),
         flags & !libc::O_NOFOLLOW,
     )
+}
+
+/// macOS: /proc/self/fd does not exist. Use fcntl(F_GETPATH) to get the path,
+/// then reopen it with the requested flags.
+// TODO(macos): This approach has a TOCTOU race: the path could change between
+// F_GETPATH and the subsequent open(). Also, F_GETPATH may fail for certain
+// fd types (e.g. pipes, sockets).
+#[cfg(target_os = "macos")]
+pub fn reopen_fd_through_proc(
+    fd: &impl AsRawFd,
+    flags: libc::c_int,
+    _proc_self_fd: &File,
+) -> io::Result<File> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    let ret = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+    if ret == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let path = CStr::from_bytes_until_nul(&buf)
+        .map_err(|_| other_io_error("F_GETPATH returned invalid path"))?;
+    let new_fd = unsafe { libc::open(path.as_ptr(), flags & !libc::O_NOFOLLOW) };
+    if new_fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(new_fd) })
+    }
 }
 
 /// Returns true if it's safe to open this inode without O_PATH.
@@ -97,6 +124,7 @@ pub(crate) enum FdPathError {
 }
 
 /// Looks up an FD's path through /proc/self/fd
+#[cfg(target_os = "linux")]
 pub(crate) fn get_path_by_fd(
     fd: &impl AsRawFd,
     proc_self_fd: &impl AsRawFd,
@@ -136,6 +164,39 @@ pub(crate) fn get_path_by_fd(
     }
 
     Ok(link_target_cstring)
+}
+
+/// macOS: /proc/self/fd does not exist. Use fcntl(F_GETPATH) to resolve the path.
+#[cfg(target_os = "macos")]
+pub(crate) fn get_path_by_fd(
+    fd: &impl AsRawFd,
+    _proc_self_fd: &impl AsRawFd,
+) -> Result<CString, FdPathError> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    let ret = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+    if ret == -1 {
+        return Err(FdPathError::ReadLink(io::Error::last_os_error()));
+    }
+
+    // Find the NUL terminator
+    let nul_pos = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    if nul_pos == 0 {
+        return Err(FdPathError::ReadLink(other_io_error(
+            "F_GETPATH returned empty path",
+        )));
+    }
+    buf.truncate(nul_pos + 1); // include the NUL byte
+
+    let path_cstring = CString::from_vec_with_nul(buf)
+        .map_err(|err| FdPathError::InvalidCString(other_io_error(err)))?;
+    let path_str = path_cstring.to_string_lossy();
+
+    let pre_slash = path_str.split('/').next().unwrap();
+    if pre_slash.contains(':') {
+        return Err(FdPathError::NotAFile(path_str.into_owned()));
+    }
+
+    Ok(path_cstring)
 }
 
 impl From<FdPathError> for io::Error {
