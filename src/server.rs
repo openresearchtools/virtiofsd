@@ -23,6 +23,68 @@ use vm_memory::ByteValued;
 
 const FUSE_BUFFER_HEADER_SIZE: u32 = 0x1000;
 const MAX_BUFFER_SIZE: u32 = 1 << 20;
+
+/// Translate a native errno value to a Linux errno value.
+///
+/// The FUSE protocol uses Linux errno values. On Linux this is a no-op, but on macOS
+/// many errno values differ and must be translated before being sent to the guest kernel.
+#[cfg(target_os = "linux")]
+#[inline]
+fn errno_to_linux(errno: i32) -> i32 {
+    errno
+}
+
+#[cfg(target_os = "macos")]
+fn errno_to_linux(errno: i32) -> i32 {
+    // Common errno values that are the same on both platforms (1-34 mostly match):
+    // EPERM=1, ENOENT=2, ESRCH=3, EINTR=4, EIO=5, ENXIO=6, E2BIG=7, ENOEXEC=8,
+    // EBADF=9, ECHILD=10, EACCES=13, EFAULT=14, EBUSY=16, EEXIST=17, EXDEV=18,
+    // ENODEV=19, ENOTDIR=20, EISDIR=21, EINVAL=22, ENFILE=23, EMFILE=24, ENOTTY=25,
+    // EFBIG=27, ENOSPC=28, ESPIPE=29, EROFS=30, EPIPE=32
+    //
+    // Values that differ between macOS and Linux:
+    match errno {
+        // macOS values -> Linux values (only for those that differ)
+        35 => 11,   // EAGAIN/EWOULDBLOCK: macOS=35, Linux=11
+        36 => 115,  // EINPROGRESS: macOS=36, Linux=115
+        37 => 114,  // EALREADY: macOS=37, Linux=114
+        38 => 88,   // ENOTSOCK: macOS=38, Linux=88
+        39 => 89,   // EDESTADDRREQ: macOS=39, Linux=89
+        40 => 90,   // EMSGSIZE: macOS=40, Linux=90
+        41 => 91,   // EPROTOTYPE: macOS=41, Linux=91
+        42 => 92,   // ENOPROTOOPT: macOS=42, Linux=92
+        43 => 93,   // EPROTONOSUPPORT: macOS=43, Linux=93
+        45 => 95,   // EOPNOTSUPP/ENOTSUP: macOS=45, Linux=95
+        47 => 97,   // EAFNOSUPPORT: macOS=47, Linux=97
+        48 => 98,   // EADDRINUSE: macOS=48, Linux=98
+        49 => 99,   // EADDRNOTAVAIL: macOS=49, Linux=99
+        50 => 100,  // ENETDOWN: macOS=50, Linux=100
+        51 => 101,  // ENETUNREACH: macOS=51, Linux=101
+        52 => 102,  // ENETRESET: macOS=52, Linux=102
+        53 => 103,  // ECONNABORTED: macOS=53, Linux=103
+        54 => 104,  // ECONNRESET: macOS=54, Linux=104
+        55 => 105,  // ENOBUFS: macOS=55, Linux=105
+        56 => 106,  // EISCONN: macOS=56, Linux=106
+        57 => 107,  // ENOTCONN: macOS=57, Linux=107
+        60 => 110,  // ETIMEDOUT: macOS=60, Linux=110
+        61 => 111,  // ECONNREFUSED: macOS=61, Linux=111
+        62 => 40,   // ELOOP: macOS=62, Linux=40
+        63 => 36,   // ENAMETOOLONG: macOS=63, Linux=36
+        66 => 113,  // EHOSTUNREACH: macOS=66, Linux=113
+        67 => 39,   // ENOTEMPTY: macOS=67, Linux=39
+        69 => 122,  // EDQUOT: macOS=69, Linux=122
+        70 => 116,  // ESTALE: macOS=70, Linux=116
+        71 => 6,    // ENXIO (alternate): macOS=71 (EREMOTE), Linux doesn't have EREMOTE, use ENXIO
+        78 => 38,   // ENOSYS: macOS=78, Linux=38
+        84 => 75,   // EOVERFLOW: macOS=84, Linux=75
+        85 => 123,  // ECANCELED: macOS=85, Linux=125
+        86 => 84,   // EILSEQ: macOS=86, Linux=84
+        87 => 35,   // EDEADLK (alternate on some macOS): use Linux value
+        92 => 95,   // ENOTSUP: macOS=45 (same as EOPNOTSUPP), but some paths use 92
+        100 => 71,  // EPROTO: macOS=100, Linux=71
+        _ => errno, // Pass through unchanged (covers the common 1-34 range)
+    }
+}
 const DIRENT_PADDING: [u8; 8] = [0; 8];
 
 const CURRENT_DIR_CSTR: &[u8] = b".";
@@ -1565,9 +1627,10 @@ fn strerror(error: i32) -> String {
 }
 
 fn reply_error(e: io::Error, unique: u64, mut w: Writer) -> Result<usize> {
+    let native_errno = e.raw_os_error().unwrap_or(libc::EIO);
     let header = OutHeader {
         len: size_of::<OutHeader>() as u32,
-        error: -e.raw_os_error().unwrap_or(libc::EIO),
+        error: -errno_to_linux(native_errno),
         unique,
     };
 

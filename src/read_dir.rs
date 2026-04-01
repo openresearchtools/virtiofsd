@@ -27,10 +27,13 @@ struct LinuxDirent64 {
 unsafe impl ByteValued for LinuxDirent64 {}
 
 /// macOS dirent structure for getdirentries.
-/// On macOS, struct dirent has: d_fileno (ino_t), d_seekoff (u64), d_reclen (u16),
-/// d_namlen (u16), d_type (u8), then d_name[].
-// TODO(macos): The macOS dirent layout varies by version. This targets macOS 10.15+.
-// On older macOS, the layout may differ. Also, d_seekoff is macOS-specific.
+/// On macOS (arm64/x86_64), struct dirent has:
+///   d_ino (u64, offset 0), d_seekoff (u64, offset 8), d_reclen (u16, offset 16),
+///   d_namlen (u16, offset 18), d_type (u8, offset 20), then d_name[] at offset 21.
+///
+/// IMPORTANT: Due to #[repr(C)] alignment padding, size_of::<MacDirent>() = 24,
+/// but d_name actually starts at byte 21. Use MACOS_DIRENT_NAME_OFFSET instead
+/// of size_of::<MacDirent>() to find the name.
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -40,8 +43,14 @@ struct MacDirent {
     d_reclen: u16,
     d_namlen: u16,
     d_type: u8,
-    // d_name follows (variable length)
+    // d_name follows at byte offset 21 (no padding before it)
 }
+
+/// The byte offset where d_name starts in the on-disk dirent structure.
+/// This is NOT size_of::<MacDirent>() because the compiler adds 3 bytes of
+/// padding after d_type (u8) to reach 8-byte alignment for the struct.
+#[cfg(target_os = "macos")]
+const MACOS_DIRENT_NAME_OFFSET: usize = 21;
 
 #[cfg(target_os = "macos")]
 impl Default for MacDirent {
@@ -64,6 +73,11 @@ pub struct ReadDir<P> {
     buf: P,
     current: usize,
     end: usize,
+    /// On macOS, __getdirentries64 returns d_seekoff=0 for all entries.
+    /// We track the base position returned by __getdirentries64 and use it
+    /// to synthesize valid offsets for the FUSE protocol.
+    #[cfg(target_os = "macos")]
+    base_offset: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -148,10 +162,17 @@ impl<P: DerefMut<Target = [u8]>> ReadDir<P> {
             return Err(io::Error::last_os_error());
         }
 
+        // On macOS/APFS, basep from __getdirentries64 is often 0.
+        // Use lseek(SEEK_CUR) after the call to get the real directory position
+        // that can be used to resume reading.
+        let dir_pos = unsafe { libc::lseek(dir.as_raw_fd(), 0, libc::SEEK_CUR) };
+        let base_offset = if dir_pos > 0 { dir_pos as u64 } else { basep as u64 };
+
         Ok(ReadDir {
             buf,
             current: 0,
             end: res as usize,
+            base_offset,
         })
     }
 }
@@ -210,7 +231,7 @@ impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
 impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
     fn next(&mut self) -> Option<DirEntry<'_>> {
         let rem = &self.buf[self.current..self.end];
-        if rem.is_empty() || rem.len() < size_of::<MacDirent>() {
+        if rem.is_empty() || rem.len() < MACOS_DIRENT_NAME_OFFSET {
             return None;
         }
 
@@ -223,8 +244,8 @@ impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
             return None;
         }
 
-        // Name starts after the fixed header
-        let name_start = size_of::<MacDirent>();
+        // Name starts at the real on-disk offset (21), NOT size_of::<MacDirent>() (24)
+        let name_start = MACOS_DIRENT_NAME_OFFSET;
         let name_end = name_start + header.d_namlen as usize;
         if name_end > rem.len() {
             return None;
@@ -239,14 +260,34 @@ impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
         };
 
         let name = strip_padding(name_with_nul);
+
+        // macOS __getdirentries64 often returns d_seekoff=0 for all entries.
+        // The FUSE protocol needs a unique, non-zero offset for each entry
+        // so the guest can resume reading. If d_seekoff is 0, use the byte
+        // position after this entry as a synthetic offset. When d_seekoff is
+        // non-zero, prefer it. The final entry should use base_offset (the
+        // directory position after this batch) so the guest can request the
+        // next batch correctly.
+        let next_pos = self.current + header.d_reclen as usize;
+        let offset = if header.d_seekoff != 0 {
+            header.d_seekoff
+        } else if next_pos >= self.end {
+            // Last entry in this batch — use the base_offset from __getdirentries64
+            // which represents where the next read should start
+            self.base_offset
+        } else {
+            // Use the byte position as a synthetic offset
+            next_pos as u64
+        };
+
         let entry = DirEntry {
             ino: header.d_ino,
-            offset: header.d_seekoff,
+            offset,
             type_: header.d_type as u32,
             name,
         };
 
-        self.current += header.d_reclen as usize;
+        self.current = next_pos;
 
         Some(entry)
     }

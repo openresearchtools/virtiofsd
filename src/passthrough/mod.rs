@@ -29,6 +29,7 @@ use crate::passthrough::inode_store::{
 };
 use crate::passthrough::util::{
     ebadf, is_safe_inode, openat, openat_verbose, reopen_fd_through_proc,
+    translate_linux_open_flags,
 };
 use crate::read_dir::ReadDir;
 use crate::soft_idmap::{self, GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
@@ -514,11 +515,25 @@ impl PassthroughFs {
         let proc_self_fd = if let Some(fd) = cfg.proc_sfd_rawfd.take() {
             fd
         } else {
-            openat_verbose(
-                &libc::AT_FDCWD,
-                "/proc/self/fd",
-                O_PATH_OR_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )?
+            #[cfg(target_os = "linux")]
+            {
+                openat_verbose(
+                    &libc::AT_FDCWD,
+                    "/proc/self/fd",
+                    O_PATH_OR_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )?
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // macOS has no /proc/self/fd. We use fcntl(F_GETPATH) for fd-to-path
+                // resolution instead, so this FD is just a placeholder.
+                // Open /dev as a stand-in directory FD.
+                openat_verbose(
+                    &libc::AT_FDCWD,
+                    "/dev",
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )?
+            }
         };
 
         let orig_wd_fd = openat_verbose(
@@ -527,6 +542,7 @@ impl PassthroughFs {
             O_PATH_OR_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )?;
 
+        #[cfg(target_os = "linux")]
         let mount_fds = if cfg.inode_file_handles == InodeFileHandlesMode::Never
             && cfg.migration_mode != MigrationMode::FileHandles
         {
@@ -542,6 +558,11 @@ impl PassthroughFs {
                 )?
             };
             Some(MountFds::new(mountinfo_fd, cfg.mountinfo_prefix.clone()))
+        };
+        #[cfg(target_os = "macos")]
+        let mount_fds: Option<MountFds> = {
+            // macOS has no /proc/self/mountinfo or file handles
+            None
         };
 
         let uid_map = if let Some(map) = cfg.uid_map.take() {
@@ -947,10 +968,14 @@ impl PassthroughFs {
         kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
+        // The guest kernel sends open flags using Linux numeric values.
+        // Translate them to native (macOS) values before any further processing.
+        let mut flags = translate_linux_open_flags(flags as i32) as u32;
+
         // We need to clean the `O_APPEND` flag in case the file is mem mapped or if the flag
         // is later modified in the guest using `fcntl(F_SETFL)`. We do a per-write `O_APPEND`
         // check setting `RWF_APPEND` for non-mmapped writes, if necessary.
-        let mut flags = flags & !(libc::O_APPEND as u32);
+        flags &= !(libc::O_APPEND as u32);
 
         // Clean O_NOATIME (unless specified otherwise with --preserve-noatime) to prevent
         // potential permission errors when running in unprivileged mode.
@@ -1173,6 +1198,9 @@ impl PassthroughFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<RawFd> {
+        // Translate Linux open flags from the guest to native flags
+        let native_flags = translate_linux_open_flags(flags as i32);
+
         let fd = {
             let _credentials_guard = self.unix_credentials_guard(ctx, &extensions)?;
             let _umask_guard = self
@@ -1185,7 +1213,7 @@ impl PassthroughFs {
             self.open_relative_to(
                 parent_file,
                 name,
-                flags as i32 | libc::O_CREAT | libc::O_EXCL,
+                native_flags | libc::O_CREAT | libc::O_EXCL,
                 mode.into(),
             )?
         };
@@ -1632,7 +1660,11 @@ impl FileSystem for PassthroughFs {
         inode: Inode,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
-        self.do_open(inode, false, flags | (libc::O_DIRECTORY as u32))
+        // Use the Linux O_DIRECTORY value (0o200000) since do_open() translates
+        // Linux flags to native flags. Adding the macOS constant here would be
+        // incorrectly translated.
+        const LINUX_O_DIRECTORY: u32 = 0o200000;
+        self.do_open(inode, false, flags | LINUX_O_DIRECTORY)
     }
 
     fn releasedir(
@@ -1700,6 +1732,7 @@ impl FileSystem for PassthroughFs {
         size: u32,
         offset: u64,
     ) -> io::Result<Self::DirIter> {
+        log::debug!("readdir: inode={}, handle={}, size={}, offset={}", inode, handle, size, offset);
         if size == 0 {
             return Ok(ReadDir::default());
         }
@@ -1713,7 +1746,12 @@ impl FileSystem for PassthroughFs {
         #[allow(clippy::readonly_write_lock)]
         let dir = data.file.get()?.write().unwrap();
 
-        ReadDir::new(&*dir, offset as libc::off64_t, buf)
+        let result = ReadDir::new(&*dir, offset as libc::off64_t, buf);
+        match &result {
+            Ok(rd) => log::debug!("readdir: ReadDir::new succeeded, remaining={}", rd.remaining()),
+            Err(e) => log::debug!("readdir: ReadDir::new failed: {}", e),
+        }
+        result
     }
 
     fn open(

@@ -168,19 +168,24 @@ pub fn statx(dir: &impl AsRawFd, path: Option<&CStr>) -> io::Result<StatExt> {
 // with submount announcement.
 #[cfg(target_os = "macos")]
 pub fn statx(dir: &impl AsRawFd, path: Option<&CStr>) -> io::Result<StatExt> {
-    let path = path.unwrap_or_else(|| unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) });
-
     // On macOS, stat and stat64 are the same (always 64-bit).
-    // We use fstatat which operates on libc::stat, then transmute to stat64.
     let mut st_buf = unsafe { MaybeUninit::<libc::stat>::zeroed().assume_init() };
-    let res = unsafe {
-        libc::fstatat(
-            dir.as_raw_fd(),
-            path.as_ptr(),
-            &mut st_buf,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
+
+    let res = match path {
+        Some(p) => unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                p.as_ptr(),
+                &mut st_buf,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        },
+        None => {
+            // macOS has no AT_EMPTY_PATH, so use fstat() directly on the fd
+            unsafe { libc::fstat(dir.as_raw_fd(), &mut st_buf) }
+        }
     };
+
     // On macOS, libc::stat and libc::stat64 have the same layout
     let st: libc::stat64 = unsafe { std::mem::transmute(st_buf) };
     if res == 0 {
