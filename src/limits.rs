@@ -31,7 +31,7 @@ fn get_max_nofile() -> Result<rlim_t, String> {
             name.as_ptr(),
             &mut val as *mut _ as *mut libc::c_void,
             &mut len,
-            std::ptr::null(),
+            std::ptr::null_mut(),
             0,
         )
     };

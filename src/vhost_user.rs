@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
+#[cfg(target_os = "macos")]
+use crate::libc_compat as libc;
+
 use std::convert::TryInto;
 use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};

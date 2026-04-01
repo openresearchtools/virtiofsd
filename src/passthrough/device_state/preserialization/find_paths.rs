@@ -308,7 +308,7 @@ impl<'a> Constructor<'a> {
             file_or_handle,
             refcount: AtomicU64::new(1),
             ids,
-            mode: stat.st.st_mode,
+            mode: stat.st.st_mode as u32,
             migration_info: Mutex::new(Some(mig_info)),
         };
 

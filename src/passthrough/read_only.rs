@@ -9,6 +9,9 @@
 //! [`FileSystem`] and [`SerializableFileSystem`] traits, so can be used as a virtiofsd filesystem
 //! driver.
 
+#[cfg(target_os = "macos")]
+use crate::libc_compat as libc;
+
 use super::util::{einval, erofs};
 use super::PassthroughFs;
 use crate::filesystem::{

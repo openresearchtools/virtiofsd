@@ -22,7 +22,7 @@ fn try_lock_file(file: &File) -> Result<(), Error> {
 pub fn write_pid_file(pid_file_name: &Path) -> Result<File, std::io::Error> {
     let mut pid_file = loop {
         let file = OpenOptions::new()
-            .mode(libc::S_IRUSR | libc::S_IWUSR)
+            .mode((libc::S_IRUSR | libc::S_IWUSR) as u32)
             .custom_flags(libc::O_CLOEXEC)
             .write(true)
             .create(true)

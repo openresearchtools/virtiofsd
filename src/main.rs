@@ -711,15 +711,15 @@ fn main() {
         CachePolicy::Always => Duration::from_secs(86400),
     };
 
-    let umask = if opt.socket_group.is_some() {
-        libc::S_IROTH | libc::S_IWOTH | libc::S_IXOTH
+    let umask: u32 = if opt.socket_group.is_some() {
+        (libc::S_IROTH | libc::S_IWOTH | libc::S_IXOTH) as u32
     } else {
-        libc::S_IRGRP
+        (libc::S_IRGRP
             | libc::S_IWGRP
             | libc::S_IXGRP
             | libc::S_IROTH
             | libc::S_IWOTH
-            | libc::S_IXOTH
+            | libc::S_IXOTH) as u32
     };
 
     // We need to keep _pid_file around because it maintains a lock on the pid file

@@ -8,6 +8,56 @@ use std::io::{self, Error, Result};
 use std::os::unix::io::{AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::prelude::FromRawFd;
 
+// macOS type compatibility: on macOS all types are already 64-bit,
+// so we alias the Linux *64 variants to the base types.
+#[cfg(target_os = "macos")]
+pub mod compat {
+    #![allow(non_camel_case_types)]
+    pub type stat64 = libc::stat;
+    pub type statvfs64 = libc::statvfs;
+    pub type ino64_t = libc::ino_t;
+    pub type off64_t = libc::off_t;
+
+    /// `O_TMPFILE` does not exist on macOS.
+    /// We define it as 0 so that code compiles; callers must use cfg guards
+    /// on any code path that actually passes it to `open()`.
+    pub const O_TMPFILE: libc::c_int = 0;
+
+    /// `O_DIRECT` does not exist on macOS. Defined as 0 for compilation.
+    pub const O_DIRECT: libc::c_int = 0;
+
+    /// `O_NOATIME` does not exist on macOS. Defined as 0 for compilation.
+    pub const O_NOATIME: libc::c_int = 0;
+
+    /// `fstatvfs64` on macOS is just `fstatvfs`.
+    ///
+    /// # Safety
+    /// Same as `libc::fstatvfs`.
+    pub unsafe fn fstatvfs64(fd: libc::c_int, buf: *mut statvfs64) -> libc::c_int {
+        libc::fstatvfs(fd, buf)
+    }
+
+    /// `fdatasync` on macOS: use `fcntl(F_FULLFSYNC)` for best-effort data sync.
+    ///
+    /// # Safety
+    /// Same as `libc::fcntl`.
+    pub unsafe fn fdatasync(fd: libc::c_int) -> libc::c_int {
+        libc::fcntl(fd, libc::F_FULLFSYNC)
+    }
+
+    /// `CLONE_FS` does not exist on macOS.
+    pub const CLONE_FS: libc::c_int = 0;
+
+    /// `unshare()` does not exist on macOS.
+    /// Returns success (no-op) since namespace isolation is not available.
+    ///
+    /// # Safety
+    /// No-op, always safe.
+    pub unsafe fn unshare(_flags: libc::c_int) -> libc::c_int {
+        0 // success, no-op
+    }
+}
+
 // A helper function that check the return value of a C function call
 // and wraps it in a `Result` type, returning the `errno` code as `Err`.
 fn check_retval<T: From<i8> + PartialEq>(t: T) -> Result<T> {
@@ -167,14 +217,14 @@ pub fn fchmodat(dirfd: RawFd, pathname: String, mode: libc::mode_t, flags: i32) 
 pub fn umask(mask: u32) -> u32 {
     // SAFETY: this call doesn't modify any memory and there is no need
     // to check the return value because this system call always succeeds.
-    unsafe { libc::umask(mask) }
+    unsafe { libc::umask(mask as libc::mode_t) as u32 }
 }
 
 /// An RAII implementation of a scoped file mode creation mask (umask), it set the
 /// new umask. When this structure is dropped (falls out of scope), it set the previous
 /// value of the mask.
 pub struct ScopedUmask {
-    umask: libc::mode_t,
+    umask: u32,
 }
 
 impl ScopedUmask {
@@ -618,10 +668,12 @@ bitflags! {
     }
 }
 
-/// macOS: RWF flags are not available. WritevFlags is an empty bitflags struct.
+/// macOS: RWF flags are not available. WritevFlags has dummy values for API compatibility.
 #[cfg(target_os = "macos")]
 bitflags! {
     pub struct WritevFlags: i32 {
+        /// Dummy RWF_APPEND for API compat; macOS pwritev doesn't support per-call append flags.
+        const RWF_APPEND = 0x10;
     }
 }
 

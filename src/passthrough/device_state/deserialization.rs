@@ -389,7 +389,7 @@ impl serialized::Inode {
                 dev: st.st.st_dev,
                 mnt_id: st.mnt_id,
             },
-            mode: st.st.st_mode,
+            mode: st.st.st_mode as u32,
             migration_info: Mutex::new(None),
         })
     }
@@ -479,7 +479,7 @@ impl serialized::Inode {
                 dev: st.st.st_dev,
                 mnt_id: st.mnt_id,
             },
-            mode: st.st.st_mode,
+            mode: st.st.st_mode as u32,
             migration_info: Mutex::new(None),
         })
     }

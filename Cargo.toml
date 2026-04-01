@@ -45,5 +45,10 @@ syslog = "6.1"
 capng = "0.2.2"
 libseccomp-sys = "0.2"
 
+[patch.crates-io]
+vhost = { path = "../vhost-patched/vhost" }
+vhost-user-backend = { path = "../vhost-patched/vhost-user-backend" }
+vmm-sys-util = { path = "../vmm-sys-util-patched" }
+
 [profile.release]
 lto = true

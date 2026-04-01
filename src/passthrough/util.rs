@@ -83,7 +83,7 @@ pub fn reopen_fd_through_proc(
 pub fn is_safe_inode(mode: u32) -> bool {
     // Only regular files and directories are considered safe to be opened from the file
     // server without O_PATH.
-    matches!(mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFDIR)
+    matches!(mode & libc::S_IFMT as u32, m if m == libc::S_IFREG as u32 || m == libc::S_IFDIR as u32)
 }
 
 pub fn ebadf() -> io::Error {

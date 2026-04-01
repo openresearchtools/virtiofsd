@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(target_os = "macos")]
+use crate::libc_compat as libc;
+
 pub mod credentials;
 pub mod device_state;
 pub mod file_handle;
@@ -914,7 +917,7 @@ impl PassthroughFs {
                     dev: st.st.st_dev,
                     mnt_id: st.mnt_id,
                 },
-                mode: st.st.st_mode,
+                mode: st.st.st_mode as u32,
                 migration_info: Mutex::new(mig_info),
             };
             self.inodes.get_or_insert(inode_data)?
@@ -1118,9 +1121,9 @@ impl PassthroughFs {
                     let proc_file_name = CString::new(format!("{fd}"))
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                     let _working_dir_guard = self.switch_to_proc_self_fd();
-                    unsafe { libc::removexattr(proc_file_name.as_ptr(), xattrname.as_ptr()) }
+                    unsafe { libc::removexattr(proc_file_name.as_ptr(), xattrname.as_ptr(), 0) }
                 } else {
-                    unsafe { libc::fremovexattr(fd, xattrname.as_ptr()) }
+                    unsafe { libc::fremovexattr(fd, xattrname.as_ptr(), 0) }
                 };
 
                 if res == 0 {
@@ -1206,7 +1209,8 @@ impl PassthroughFs {
                     xattr_name.as_ptr(),
                     secctx.secctx.as_ptr() as *const libc::c_void,
                     secctx.secctx.len(),
-                    0,
+                    0, // position
+                    0, // options
                 )
             };
 
@@ -1256,7 +1260,8 @@ impl PassthroughFs {
                 xattr_name.as_ptr(),
                 secctx.secctx.as_ptr() as *const libc::c_void,
                 secctx.secctx.len(),
-                0,
+                0, // position
+                0, // options
             )
         };
 
@@ -1316,7 +1321,7 @@ impl PassthroughFs {
                 dev: st.st.st_dev,
                 mnt_id: st.mnt_id,
             },
-            mode: st.st.st_mode,
+            mode: st.st.st_mode as u32,
             migration_info: Mutex::new(migration_info),
         };
         self.inodes.new_inode(inode)?;
@@ -1661,7 +1666,7 @@ impl FileSystem for PassthroughFs {
                 .then(|| oslib::ScopedUmask::new(umask));
 
             // Safe because this doesn't modify any memory and we check the return value.
-            unsafe { libc::mkdirat(parent_file.as_raw_fd(), name.as_ptr(), mode) }
+            unsafe { libc::mkdirat(parent_file.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) }
         };
         if let Some(invalidated_inode) = invalidated_inode {
             self.after_invalidating_path(invalidated_inode, "Overwrote (via mkdir)");
@@ -1926,9 +1931,9 @@ impl FileSystem for PassthroughFs {
             // Safe because this doesn't modify any memory and we check the return value.
             let res = unsafe {
                 match data {
-                    Data::Handle(_, fd) => libc::fchmod(fd, attr.mode),
+                    Data::Handle(_, fd) => libc::fchmod(fd, attr.mode as libc::mode_t),
                     Data::ProcPath(ref p) => {
-                        libc::fchmodat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), attr.mode, 0)
+                        libc::fchmodat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), attr.mode as libc::mode_t, 0)
                     }
                 }
             };
@@ -2164,7 +2169,7 @@ impl FileSystem for PassthroughFs {
                     parent_file.as_raw_fd(),
                     name.as_ptr(),
                     mode as libc::mode_t,
-                    u64::from(rdev),
+                    u64::from(rdev) as libc::dev_t,
                 )
             }
         };
@@ -2441,6 +2446,7 @@ impl FileSystem for PassthroughFs {
                     name.as_ptr(),
                     value.as_ptr() as *const libc::c_void,
                     value.len(),
+                    0, // position
                     flags as libc::c_int,
                 )
             }
@@ -2465,6 +2471,7 @@ impl FileSystem for PassthroughFs {
                     name.as_ptr(),
                     value.as_ptr() as *const libc::c_void,
                     value.len(),
+                    0, // position
                     flags as libc::c_int,
                 )
             }
@@ -2511,6 +2518,8 @@ impl FileSystem for PassthroughFs {
                     name.as_ptr(),
                     buf.as_mut_ptr() as *mut libc::c_void,
                     size as libc::size_t,
+                    0, // position
+                    0, // options
                 )
             }
         } else {
@@ -2528,6 +2537,8 @@ impl FileSystem for PassthroughFs {
                     name.as_ptr(),
                     buf.as_mut_ptr() as *mut libc::c_void,
                     size as libc::size_t,
+                    0, // position
+                    0, // options
                 )
             }
         };
@@ -2562,6 +2573,7 @@ impl FileSystem for PassthroughFs {
                     file.as_raw_fd(),
                     buf.as_mut_ptr() as *mut libc::c_char,
                     size as libc::size_t,
+                    0, // options
                 )
             }
         } else {
@@ -2578,6 +2590,7 @@ impl FileSystem for PassthroughFs {
                     procname.as_ptr(),
                     buf.as_mut_ptr() as *mut libc::c_char,
                     size as libc::size_t,
+                    0, // options
                 )
             }
         };
@@ -2608,7 +2621,7 @@ impl FileSystem for PassthroughFs {
             let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
 
             // Safe because this doesn't modify any memory and we check the return value.
-            unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr()) }
+            unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr(), 0) }
         } else {
             let file = data.get_file()?;
 
@@ -2618,7 +2631,7 @@ impl FileSystem for PassthroughFs {
             let _working_dir_guard = self.switch_to_proc_self_fd();
 
             // Safe because this doesn't modify any memory and we check the return value.
-            unsafe { libc::removexattr(procname.as_ptr(), name.as_ptr()) }
+            unsafe { libc::removexattr(procname.as_ptr(), name.as_ptr(), 0) }
         };
 
         if res == 0 {

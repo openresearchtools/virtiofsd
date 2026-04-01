@@ -5,6 +5,9 @@
 #[macro_use]
 extern crate log;
 
+#[cfg(target_os = "macos")]
+pub mod libc_compat;
+
 pub mod descriptor_utils;
 pub mod file_traits;
 pub mod filesystem;
