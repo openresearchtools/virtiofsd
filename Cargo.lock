@@ -818,6 +818,7 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 [[package]]
 name = "vhost"
 version = "0.15.0"
+source = "git+https://github.com/christhomas/vhost.git?branch=cth%2Fmacos#7e22f4d5b34b4795f0118346755467330828ac0a"
 dependencies = [
  "bitflags 2.4.1",
  "libc",
@@ -829,6 +830,7 @@ dependencies = [
 [[package]]
 name = "vhost-user-backend"
 version = "0.21.0"
+source = "git+https://github.com/christhomas/vhost.git?branch=cth%2Fmacos#7e22f4d5b34b4795f0118346755467330828ac0a"
 dependencies = [
  "libc",
  "log",
@@ -899,6 +901,7 @@ dependencies = [
 [[package]]
 name = "vmm-sys-util"
 version = "0.15.0"
+source = "git+https://github.com/christhomas/vmm-sys-util.git?branch=cth%2Fmacos#88d85af66f410077fce83ca526b061d396d9df9b"
 dependencies = [
  "bitflags 1.3.2",
  "libc",

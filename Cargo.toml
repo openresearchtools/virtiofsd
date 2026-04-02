@@ -46,9 +46,9 @@ capng = "0.2.2"
 libseccomp-sys = "0.2"
 
 [patch.crates-io]
-vhost = { path = "../vhost-patched/vhost" }
-vhost-user-backend = { path = "../vhost-patched/vhost-user-backend" }
-vmm-sys-util = { path = "../vmm-sys-util-patched" }
+vhost = { git = "https://github.com/christhomas/vhost.git", branch = "cth/macos" }
+vhost-user-backend = { git = "https://github.com/christhomas/vhost.git", branch = "cth/macos" }
+vmm-sys-util = { git = "https://github.com/christhomas/vmm-sys-util.git", branch = "cth/macos" }
 
 [profile.release]
 lto = true
