@@ -22,8 +22,8 @@ const EMPTY_CSTR: &[u8] = b"\0";
 /// actually passed to a syscall; it just needs to compile.
 #[cfg(target_os = "macos")]
 const AT_EMPTY_PATH: libc::c_int = 0x1000;
-#[cfg(target_os = "linux")]
-const AT_EMPTY_PATH: libc::c_int = AT_EMPTY_PATH;
+#[cfg(not(target_os = "macos"))]
+const AT_EMPTY_PATH: libc::c_int = libc::AT_EMPTY_PATH;
 
 #[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FileHandle {

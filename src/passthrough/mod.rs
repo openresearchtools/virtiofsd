@@ -1146,9 +1146,15 @@ impl PassthroughFs {
                     let proc_file_name = CString::new(format!("{fd}"))
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                     let _working_dir_guard = self.switch_to_proc_self_fd();
+                    #[cfg(target_os = "macos")]
                     unsafe { libc::removexattr(proc_file_name.as_ptr(), xattrname.as_ptr(), 0) }
+                    #[cfg(not(target_os = "macos"))]
+                    unsafe { libc::removexattr(proc_file_name.as_ptr(), xattrname.as_ptr()) }
                 } else {
+                    #[cfg(target_os = "macos")]
                     unsafe { libc::fremovexattr(fd, xattrname.as_ptr(), 0) }
+                    #[cfg(not(target_os = "macos"))]
+                    unsafe { libc::fremovexattr(fd, xattrname.as_ptr()) }
                 };
 
                 if res == 0 {
@@ -1232,14 +1238,10 @@ impl PassthroughFs {
             };
 
             let ret = unsafe {
-                libc::fsetxattr(
-                    fd,
-                    xattr_name.as_ptr(),
-                    secctx.secctx.as_ptr() as *const libc::c_void,
-                    secctx.secctx.len(),
-                    0, // position
-                    0, // options
-                )
+                #[cfg(target_os = "macos")]
+                { libc::fsetxattr(fd, xattr_name.as_ptr(), secctx.secctx.as_ptr() as *const libc::c_void, secctx.secctx.len(), 0, 0) }
+                #[cfg(not(target_os = "macos"))]
+                { libc::fsetxattr(fd, xattr_name.as_ptr(), secctx.secctx.as_ptr() as *const libc::c_void, secctx.secctx.len(), 0) }
             };
 
             if ret != 0 {
@@ -1283,14 +1285,10 @@ impl PassthroughFs {
         let _working_dir_guard = self.switch_to_proc_self_fd();
 
         let res = unsafe {
-            libc::setxattr(
-                procname.as_ptr(),
-                xattr_name.as_ptr(),
-                secctx.secctx.as_ptr() as *const libc::c_void,
-                secctx.secctx.len(),
-                0, // position
-                0, // options
-            )
+            #[cfg(target_os = "macos")]
+            { libc::setxattr(procname.as_ptr(), xattr_name.as_ptr(), secctx.secctx.as_ptr() as *const libc::c_void, secctx.secctx.len(), 0, 0) }
+            #[cfg(not(target_os = "macos"))]
+            { libc::setxattr(procname.as_ptr(), xattr_name.as_ptr(), secctx.secctx.as_ptr() as *const libc::c_void, secctx.secctx.len(), 0) }
         };
 
         let res_err = io::Error::last_os_error();
@@ -2479,14 +2477,10 @@ impl FileSystem for PassthroughFs {
 
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe {
-                libc::fsetxattr(
-                    file.as_raw_fd(),
-                    name.as_ptr(),
-                    value.as_ptr() as *const libc::c_void,
-                    value.len(),
-                    0, // position
-                    flags as libc::c_int,
-                )
+                #[cfg(target_os = "macos")]
+                { libc::fsetxattr(file.as_raw_fd(), name.as_ptr(), value.as_ptr() as *const libc::c_void, value.len(), 0, flags as libc::c_int) }
+                #[cfg(not(target_os = "macos"))]
+                { libc::fsetxattr(file.as_raw_fd(), name.as_ptr(), value.as_ptr() as *const libc::c_void, value.len(), flags as libc::c_int) }
             }
         } else {
             let file = data.get_file()?;
@@ -2504,14 +2498,10 @@ impl FileSystem for PassthroughFs {
 
             // Safe because this doesn't modify any memory and we check the return value.
             unsafe {
-                libc::setxattr(
-                    procname.as_ptr(),
-                    name.as_ptr(),
-                    value.as_ptr() as *const libc::c_void,
-                    value.len(),
-                    0, // position
-                    flags as libc::c_int,
-                )
+                #[cfg(target_os = "macos")]
+                { libc::setxattr(procname.as_ptr(), name.as_ptr(), value.as_ptr() as *const libc::c_void, value.len(), 0, flags as libc::c_int) }
+                #[cfg(not(target_os = "macos"))]
+                { libc::setxattr(procname.as_ptr(), name.as_ptr(), value.as_ptr() as *const libc::c_void, value.len(), flags as libc::c_int) }
             }
         };
         if res == 0 {
@@ -2551,14 +2541,10 @@ impl FileSystem for PassthroughFs {
 
             // Safe because this will only modify the contents of `buf`.
             unsafe {
-                libc::fgetxattr(
-                    file.as_raw_fd(),
-                    name.as_ptr(),
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    size as libc::size_t,
-                    0, // position
-                    0, // options
-                )
+                #[cfg(target_os = "macos")]
+                { libc::fgetxattr(file.as_raw_fd(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, size as libc::size_t, 0, 0) }
+                #[cfg(not(target_os = "macos"))]
+                { libc::fgetxattr(file.as_raw_fd(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, size as libc::size_t) }
             }
         } else {
             let file = data.get_file()?;
@@ -2570,14 +2556,10 @@ impl FileSystem for PassthroughFs {
 
             // Safe because this will only modify the contents of `buf`.
             unsafe {
-                libc::getxattr(
-                    procname.as_ptr(),
-                    name.as_ptr(),
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    size as libc::size_t,
-                    0, // position
-                    0, // options
-                )
+                #[cfg(target_os = "macos")]
+                { libc::getxattr(procname.as_ptr(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, size as libc::size_t, 0, 0) }
+                #[cfg(not(target_os = "macos"))]
+                { libc::getxattr(procname.as_ptr(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, size as libc::size_t) }
             }
         };
         if res < 0 {
@@ -2607,12 +2589,10 @@ impl FileSystem for PassthroughFs {
 
             // Safe because this will only modify the contents of `buf`.
             unsafe {
-                libc::flistxattr(
-                    file.as_raw_fd(),
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    size as libc::size_t,
-                    0, // options
-                )
+                #[cfg(target_os = "macos")]
+                { libc::flistxattr(file.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_char, size as libc::size_t, 0) }
+                #[cfg(not(target_os = "macos"))]
+                { libc::flistxattr(file.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_char, size as libc::size_t) }
             }
         } else {
             let file = data.get_file()?;
@@ -2624,12 +2604,10 @@ impl FileSystem for PassthroughFs {
 
             // Safe because this will only modify the contents of `buf`.
             unsafe {
-                libc::listxattr(
-                    procname.as_ptr(),
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    size as libc::size_t,
-                    0, // options
-                )
+                #[cfg(target_os = "macos")]
+                { libc::listxattr(procname.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char, size as libc::size_t, 0) }
+                #[cfg(not(target_os = "macos"))]
+                { libc::listxattr(procname.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char, size as libc::size_t) }
             }
         };
         if res < 0 {
@@ -2659,7 +2637,10 @@ impl FileSystem for PassthroughFs {
             let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
 
             // Safe because this doesn't modify any memory and we check the return value.
+            #[cfg(target_os = "macos")]
             unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr(), 0) }
+            #[cfg(not(target_os = "macos"))]
+            unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr()) }
         } else {
             let file = data.get_file()?;
 
@@ -2669,7 +2650,10 @@ impl FileSystem for PassthroughFs {
             let _working_dir_guard = self.switch_to_proc_self_fd();
 
             // Safe because this doesn't modify any memory and we check the return value.
+            #[cfg(target_os = "macos")]
             unsafe { libc::removexattr(procname.as_ptr(), name.as_ptr(), 0) }
+            #[cfg(not(target_os = "macos"))]
+            unsafe { libc::removexattr(procname.as_ptr(), name.as_ptr()) }
         };
 
         if res == 0 {
