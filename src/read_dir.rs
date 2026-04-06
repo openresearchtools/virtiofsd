@@ -6,6 +6,7 @@ use crate::libc_compat as libc;
 
 use crate::filesystem::{DirEntry, DirectoryIterator};
 
+use std::convert::TryInto;
 use std::ffi::CStr;
 use std::io;
 use std::mem::size_of;
@@ -68,16 +69,42 @@ impl Default for MacDirent {
 #[cfg(target_os = "macos")]
 unsafe impl ByteValued for MacDirent {}
 
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 pub struct ReadDir<P> {
     buf: P,
     current: usize,
     end: usize,
-    /// On macOS, __getdirentries64 returns d_seekoff=0 for all entries.
-    /// We track the base position returned by __getdirentries64 and use it
-    /// to synthesize valid offsets for the FUSE protocol.
-    #[cfg(target_os = "macos")]
-    base_offset: u64,
+}
+
+#[cfg(target_os = "macos")]
+pub struct ReadDir<P> {
+    /// The full directory contents, read into an owned buffer.
+    /// The generic `P` is kept for API compatibility but not used for storage.
+    _phantom: std::marker::PhantomData<P>,
+    dir_buf: Vec<u8>,
+    current: usize,
+    end: usize,
+    /// Number of entries still to skip before we start returning results.
+    /// On macOS/APFS, directory seek positions are unreliable, so we always
+    /// read from the beginning and skip `offset` entries by count.
+    skip_remaining: usize,
+    /// 1-based entry index, used as the FUSE offset for each returned entry.
+    entry_index: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl<P> Default for ReadDir<P> {
+    fn default() -> Self {
+        ReadDir {
+            _phantom: std::marker::PhantomData,
+            dir_buf: Vec::new(),
+            current: 0,
+            end: 0,
+            skip_remaining: 0,
+            entry_index: 0,
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -130,55 +157,86 @@ extern "C" {
     fn __getdirentries64(
         fd: libc::c_int,
         buf: *mut libc::c_char,
-        bufsize: libc::size_t,
+        bufsize: libc::c_int,
         basep: *mut libc::off_t,
-    ) -> libc::ssize_t;
+    ) -> libc::c_int;
 }
 
 #[cfg(target_os = "macos")]
 impl<P: DerefMut<Target = [u8]>> ReadDir<P> {
-    pub fn new<D: AsRawFd>(dir: &D, offset: libc::off64_t, buf: P) -> io::Result<Self> {
-        let res = unsafe { libc::lseek(dir.as_raw_fd(), offset as libc::off_t, libc::SEEK_SET) };
+    /// On macOS/APFS, directory seek positions are unreliable. Instead of
+    /// seeking to `offset`, we always read from the beginning and treat
+    /// `offset` as the number of entries to skip. Each entry is assigned a
+    /// 1-based index as its FUSE offset.
+    pub fn new<D: AsRawFd>(dir: &D, offset: libc::off64_t, _buf: P) -> io::Result<Self> {
+        // Always rewind to the start of the directory.
+        let res = unsafe { libc::lseek(dir.as_raw_fd(), 0, libc::SEEK_SET) };
         if res < 0 {
             return Err(io::Error::last_os_error());
         }
 
-        unsafe { Self::new_no_seek(dir, buf) }
+        let mut rd = unsafe { Self::new_no_seek(dir, _buf)? };
+        rd.skip_remaining = offset as usize;
+        // entry_index starts at 0; it will be incremented as we iterate
+        // (including during skips), so after skipping N entries it will be N.
+        Ok(rd)
     }
 
     /// # Safety
-    /// Caller must ensure the current position is valid.
-    pub unsafe fn new_no_seek<D: AsRawFd>(dir: &D, mut buf: P) -> io::Result<Self> {
-        let mut basep: libc::off_t = 0;
-        let res = unsafe {
-            __getdirentries64(
-                dir.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-                &mut basep,
-            )
-        };
-        if res < 0 {
-            return Err(io::Error::last_os_error());
+    /// Caller must ensure the fd is valid.
+    pub unsafe fn new_no_seek<D: AsRawFd>(dir: &D, _buf: P) -> io::Result<Self> {
+        // Read the entire directory into an owned buffer. We use a growing
+        // Vec because the FUSE-provided buffer may be too small for large
+        // directories (e.g. node_modules with 500+ entries). We read in
+        // 32KB chunks until __getdirentries64 returns 0 (end of directory).
+        let mut dir_buf = Vec::with_capacity(32 * 1024);
+        let chunk_size = 32 * 1024;
+
+        loop {
+            let old_len = dir_buf.len();
+            dir_buf.resize(old_len + chunk_size, 0);
+
+            let mut basep: libc::off_t = 0;
+            let res = unsafe {
+                __getdirentries64(
+                    dir.as_raw_fd(),
+                    dir_buf[old_len..].as_mut_ptr() as *mut libc::c_char,
+                    chunk_size as libc::c_int,
+                    &mut basep,
+                )
+            };
+            if res < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if res == 0 {
+                dir_buf.truncate(old_len);
+                break;
+            }
+            dir_buf.truncate(old_len + res as usize);
         }
 
-        // On macOS/APFS, basep from __getdirentries64 is often 0.
-        // Use lseek(SEEK_CUR) after the call to get the real directory position
-        // that can be used to resume reading.
-        let dir_pos = unsafe { libc::lseek(dir.as_raw_fd(), 0, libc::SEEK_CUR) };
-        let base_offset = if dir_pos > 0 { dir_pos as u64 } else { basep as u64 };
-
+        let end = dir_buf.len();
         Ok(ReadDir {
-            buf,
+            _phantom: std::marker::PhantomData,
+            dir_buf,
             current: 0,
-            end: res as usize,
-            base_offset,
+            end,
+            skip_remaining: 0,
+            entry_index: 0,
         })
     }
 }
 
+#[cfg(target_os = "linux")]
 impl<P> ReadDir<P> {
     /// Returns the number of bytes from the internal buffer that have not yet been consumed.
+    pub fn remaining(&self) -> usize {
+        self.end.saturating_sub(self.current)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl<P> ReadDir<P> {
     pub fn remaining(&self) -> usize {
         self.end.saturating_sub(self.current)
     }
@@ -230,66 +288,52 @@ impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
 #[cfg(target_os = "macos")]
 impl<P: Deref<Target = [u8]>> DirectoryIterator for ReadDir<P> {
     fn next(&mut self) -> Option<DirEntry<'_>> {
-        let rem = &self.buf[self.current..self.end];
-        if rem.is_empty() || rem.len() < MACOS_DIRENT_NAME_OFFSET {
-            return None;
+        loop {
+            let rem = &self.dir_buf[self.current..self.end];
+            if rem.is_empty() || rem.len() < MACOS_DIRENT_NAME_OFFSET {
+                return None;
+            }
+
+            // Parse the fixed-size fields manually from the byte buffer to
+            // avoid alignment issues.
+            let d_ino = u64::from_ne_bytes(rem[0..8].try_into().unwrap());
+            // d_seekoff at [8..16] — not used (unreliable on APFS)
+            let d_reclen = u16::from_ne_bytes(rem[16..18].try_into().unwrap());
+            let d_namlen = u16::from_ne_bytes(rem[18..20].try_into().unwrap()) as usize;
+            let d_type = rem[20];
+
+            if d_reclen == 0 || d_reclen as usize > rem.len() {
+                return None;
+            }
+
+            self.current += d_reclen as usize;
+            self.entry_index += 1;
+
+            // Skip entries that the guest has already seen.
+            if self.skip_remaining > 0 {
+                self.skip_remaining -= 1;
+                continue;
+            }
+
+            let name_start = MACOS_DIRENT_NAME_OFFSET;
+            let name_end = name_start + d_namlen;
+            if name_end > rem.len() {
+                return None;
+            }
+
+            let name = if name_end < rem.len() && rem[name_end] == 0 {
+                unsafe { CStr::from_bytes_with_nul_unchecked(&rem[name_start..=name_end]) }
+            } else {
+                strip_padding(&rem[name_start..name_end])
+            };
+
+            return Some(DirEntry {
+                ino: d_ino,
+                offset: self.entry_index,
+                type_: d_type as u32,
+                name,
+            });
         }
-
-        // Read the fixed-size header
-        let header = unsafe {
-            std::ptr::read_unaligned(rem.as_ptr() as *const MacDirent)
-        };
-
-        if header.d_reclen == 0 || (header.d_reclen as usize) > rem.len() {
-            return None;
-        }
-
-        // Name starts at the real on-disk offset (21), NOT size_of::<MacDirent>() (24)
-        let name_start = MACOS_DIRENT_NAME_OFFSET;
-        let name_end = name_start + header.d_namlen as usize;
-        if name_end > rem.len() {
-            return None;
-        }
-
-        // Need to include the NUL byte
-        let name_with_nul = if name_end < rem.len() && rem[name_end] == 0 {
-            &rem[name_start..=name_end]
-        } else {
-            // Should not happen but be safe
-            &rem[name_start..name_end]
-        };
-
-        let name = strip_padding(name_with_nul);
-
-        // macOS __getdirentries64 often returns d_seekoff=0 for all entries.
-        // The FUSE protocol needs a unique, non-zero offset for each entry
-        // so the guest can resume reading. If d_seekoff is 0, use the byte
-        // position after this entry as a synthetic offset. When d_seekoff is
-        // non-zero, prefer it. The final entry should use base_offset (the
-        // directory position after this batch) so the guest can request the
-        // next batch correctly.
-        let next_pos = self.current + header.d_reclen as usize;
-        let offset = if header.d_seekoff != 0 {
-            header.d_seekoff
-        } else if next_pos >= self.end {
-            // Last entry in this batch — use the base_offset from __getdirentries64
-            // which represents where the next read should start
-            self.base_offset
-        } else {
-            // Use the byte position as a synthetic offset
-            next_pos as u64
-        };
-
-        let entry = DirEntry {
-            ino: header.d_ino,
-            offset,
-            type_: header.d_type as u32,
-            name,
-        };
-
-        self.current = next_pos;
-
-        Some(entry)
     }
 }
 
