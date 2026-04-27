@@ -31,6 +31,8 @@ use crate::passthrough::util::{
     ebadf, is_safe_inode, openat, openat_verbose, reopen_fd_through_proc,
     translate_linux_open_flags,
 };
+#[cfg(target_os = "macos")]
+use crate::passthrough::util::get_path_by_fd;
 use crate::read_dir::ReadDir;
 use crate::soft_idmap::{self, GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
 use crate::util::{other_io_error, ResultErrorContext};
@@ -620,6 +622,30 @@ impl PassthroughFs {
         ScopedWorkingDirectory::new(self.proc_self_fd.as_raw_fd(), self.orig_wd_fd.as_raw_fd())
     }
 
+    /// Resolve an open inode fd to a (dirfd, path) pair suitable for *at() syscalls.
+    ///
+    /// Linux: returns (`/proc/self/fd` fd, "<fd>") so `*at` resolves through the proc symlink.
+    /// macOS: there is no /proc/self/fd; resolve the absolute path via `F_GETPATH` and pair it
+    /// with `AT_FDCWD`. The previous behavior on macOS produced paths like `/dev/<fd>` which
+    /// always returned ENOENT, breaking utimensat/fchmodat/linkat against fresh inodes.
+    fn at_path_for_fd(&self, fd: RawFd) -> io::Result<(RawFd, CString)> {
+        #[cfg(target_os = "linux")]
+        {
+            let path = CString::new(format!("{fd}"))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok((self.proc_self_fd.as_raw_fd(), path))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::BorrowedFd;
+            // SAFETY: the fd is owned by an InodeFile/HandleData kept alive by the caller.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+            let path = get_path_by_fd(&borrowed, &self.proc_self_fd)
+                .map_err(io::Error::from)?;
+            Ok((libc::AT_FDCWD, path))
+        }
+    }
+
     pub fn keep_fds(&self) -> Vec<RawFd> {
         vec![self.proc_self_fd.as_raw_fd()]
     }
@@ -1182,9 +1208,13 @@ impl PassthroughFs {
         let st = statx(file, None)?.st;
 
         if o_path {
+            let (dirfd, path) = self.at_path_for_fd(fd)?;
+            let path_string = path
+                .into_string()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             oslib::fchmodat(
-                self.proc_self_fd.as_raw_fd(),
-                format!("{fd}"),
+                dirfd,
+                path_string,
                 st.st_mode & 0o7777 & !libc::S_ISGID,
                 0,
             )
@@ -1948,7 +1978,7 @@ impl FileSystem for PassthroughFs {
         #[allow(dead_code)]
         enum Data {
             Handle(Arc<HandleData>, RawFd),
-            ProcPath(CString),
+            ProcPath(RawFd),
         }
 
         // If we have a handle then use it otherwise get a new fd from the inode.
@@ -1958,19 +1988,16 @@ impl FileSystem for PassthroughFs {
             let fd = hd.file.get()?.write().unwrap().as_raw_fd();
             Data::Handle(hd, fd)
         } else {
-            let pathname = CString::new(format!("{}", inode_file.as_raw_fd()))
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Data::ProcPath(pathname)
+            Data::ProcPath(inode_file.as_raw_fd())
         };
 
         if valid.contains(SetattrValid::MODE) {
             // Safe because this doesn't modify any memory and we check the return value.
-            let res = unsafe {
-                match data {
-                    Data::Handle(_, fd) => libc::fchmod(fd, attr.mode as libc::mode_t),
-                    Data::ProcPath(ref p) => {
-                        libc::fchmodat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), attr.mode as libc::mode_t, 0)
-                    }
+            let res = match data {
+                Data::Handle(_, fd) => unsafe { libc::fchmod(fd, attr.mode as libc::mode_t) },
+                Data::ProcPath(fd) => {
+                    let (dirfd, p) = self.at_path_for_fd(fd)?;
+                    unsafe { libc::fchmodat(dirfd, p.as_ptr(), attr.mode as libc::mode_t, 0) }
                 }
             };
             if res < 0 {
@@ -2073,9 +2100,10 @@ impl FileSystem for PassthroughFs {
             // Safe because this doesn't modify any memory and we check the return value.
             let res = match data {
                 Data::Handle(_, fd) => unsafe { libc::futimens(fd, tvs.as_ptr()) },
-                Data::ProcPath(ref p) => unsafe {
-                    libc::utimensat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), tvs.as_ptr(), 0)
-                },
+                Data::ProcPath(fd) => {
+                    let (dirfd, p) = self.at_path_for_fd(fd)?;
+                    unsafe { libc::utimensat(dirfd, p.as_ptr(), tvs.as_ptr(), 0) }
+                }
             };
             if res < 0 {
                 return Err(io::Error::last_os_error());
@@ -2242,14 +2270,13 @@ impl FileSystem for PassthroughFs {
         let inode_file = data.get_file()?;
         let newparent_file = new_inode.get_file()?;
 
-        let procname = CString::new(format!("{}", inode_file.as_raw_fd()))
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let (old_dirfd, procname) = self.at_path_for_fd(inode_file.as_raw_fd())?;
 
         let invalidated_inode = self.before_invalidating_path(&new_inode, newname);
         // Safe because this doesn't modify any memory and we check the return value.
         let res = unsafe {
             libc::linkat(
-                self.proc_self_fd.as_raw_fd(),
+                old_dirfd,
                 procname.as_ptr(),
                 newparent_file.as_raw_fd(),
                 newname.as_ptr(),

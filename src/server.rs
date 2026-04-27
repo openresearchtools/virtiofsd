@@ -81,6 +81,10 @@ fn errno_to_linux(errno: i32) -> i32 {
         86 => 84,   // EILSEQ: macOS=86, Linux=84
         87 => 35,   // EDEADLK (alternate on some macOS): use Linux value
         92 => 95,   // ENOTSUP: macOS=45 (same as EOPNOTSUPP), but some paths use 92
+        93 => 61,   // ENOATTR/ENODATA: macOS=ENOATTR=93, Linux=ENODATA=61.
+                    // Without this, APFS returning ENOATTR for missing xattrs
+                    // (e.g. security.selinux, system.posix_acl_*) reaches the
+                    // guest as Linux 93=EPROTONOSUPPORT, breaking `ls -la` etc.
         100 => 71,  // EPROTO: macOS=100, Linux=71
         _ => errno, // Pass through unchanged (covers the common 1-34 range)
     }
