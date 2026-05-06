@@ -2719,38 +2719,12 @@ impl FileSystem for PassthroughFs {
                 Err(io::Error::last_os_error())
             }
         }
-        // macOS: fallocate is not available. Use fcntl(F_PREALLOCATE) + ftruncate.
-        // TODO(macos): This only supports mode 0 (default allocation). Modes like
-        // FALLOC_FL_PUNCH_HOLE, FALLOC_FL_COLLAPSE_RANGE, etc. are not supported.
+        // See `macos_emulate_fallocate` in `passthrough/util.rs` for the
+        // gory details of why a naive `fcntl(F_PREALLOCATE)` translation
+        // returns EINVAL and breaks `qemu-img convert`.
         #[cfg(target_os = "macos")]
         {
-            if mode != 0 {
-                return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
-            }
-            let mut fstore = libc::fstore_t {
-                fst_flags: libc::F_ALLOCATECONTIG as libc::c_uint,
-                fst_posmode: libc::F_PEOFPOSMODE as libc::c_int,
-                fst_offset: offset as libc::off_t,
-                fst_length: length as libc::off_t,
-                fst_bytesalloc: 0,
-            };
-            let mut res = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fstore) };
-            if res == -1 {
-                // Try non-contiguous allocation
-                fstore.fst_flags = libc::F_ALLOCATEALL as libc::c_uint;
-                res = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fstore) };
-            }
-            if res == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            // Extend the file size if needed
-            let new_size = offset + length;
-            let res = unsafe { libc::ftruncate(fd, new_size as libc::off_t) };
-            if res == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
+            crate::passthrough::util::macos_emulate_fallocate(fd, mode, offset, length)
         }
     }
 

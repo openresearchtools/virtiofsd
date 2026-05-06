@@ -112,6 +112,81 @@ pub fn translate_linux_seek_whence(linux_whence: i32) -> io::Result<i32> {
     Ok(linux_whence)
 }
 
+/// Best-effort emulation of Linux `fallocate(fd, mode=0, offset, length)`
+/// on macOS.
+///
+/// Linux semantics for mode 0:
+///   * Allocate disk blocks for `[offset, offset+length)`.
+///   * Grow the file to at least `offset + length` bytes if smaller.
+///   * Subsequent writes in that range are guaranteed not to ENOSPC.
+///   * If the file is already at least `offset + length` bytes, leave
+///     the size alone.
+///
+/// macOS has no exact equivalent. We approximate as follows:
+///
+///   1. Reject every mode but 0 with `EOPNOTSUPP`. Sparse-aware tools
+///      (qemu-img, cp) probe with `FALLOC_FL_PUNCH_HOLE` etc.; failing
+///      cleanly lets them fall back to writes.
+///   2. If `target_size <= current_size`, do nothing and return Ok(()).
+///   3. Otherwise, try `fcntl(F_PREALLOCATE)` for the bytes past EOF —
+///      contiguous first, non-contiguous on fallback. **Ignore failure**:
+///      F_PREALLOCATE is fundamentally best-effort on Apple filesystems
+///      and many code paths reject it (network mounts, sparse files,
+///      certain APFS configurations). Hard-failing here would convert
+///      a transient performance hint into a fatal error, which is
+///      strictly worse than just letting the eventual write allocate.
+///   4. `ftruncate` to the target size. This is the part that gives
+///      callers the size guarantee they actually rely on.
+///
+/// **Why this exists in a helper rather than inline:** the original
+/// implementation called `fcntl(F_PREALLOCATE)` with `F_PEOFPOSMODE`
+/// and a non-zero `fst_offset`. Apple's API requires `fst_offset == 0`
+/// when using `F_PEOFPOSMODE` — the field means "bytes past EOF", not
+/// "absolute offset" — so any FUSE fallocate with a non-zero offset
+/// failed with EINVAL. That EINVAL surfaced from the guest as
+/// `qemu-img: error while writing at byte 0: Invalid argument` and
+/// killed every disk-image conversion onto a virtio-fs share.
+/// Putting the emulation in its own function lets the unit tests
+/// exercise the real syscall sequence on macOS hosts.
+#[cfg(target_os = "macos")]
+pub fn macos_emulate_fallocate(fd: libc::c_int, mode: u32, offset: u64, length: u64) -> io::Result<()> {
+    if mode != 0 {
+        return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+    }
+
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let current_size = st.st_size as u64;
+    let target_size = offset.saturating_add(length);
+
+    if target_size <= current_size {
+        return Ok(());
+    }
+
+    let bytes_past_eof = target_size - current_size;
+    let mut fstore = libc::fstore_t {
+        fst_flags: libc::F_ALLOCATECONTIG as libc::c_uint,
+        fst_posmode: libc::F_PEOFPOSMODE as libc::c_int,
+        fst_offset: 0,
+        fst_length: bytes_past_eof as libc::off_t,
+        fst_bytesalloc: 0,
+    };
+    let mut res = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fstore) };
+    if res == -1 {
+        fstore.fst_flags = libc::F_ALLOCATEALL as libc::c_uint;
+        res = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fstore) };
+    }
+    let _ = res; // intentionally ignored — see doc comment
+
+    let res = unsafe { libc::ftruncate(fd, target_size as libc::off_t) };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Safe wrapper around libc::openat().
 pub fn openat(dir_fd: &impl AsRawFd, path: &str, flags: libc::c_int) -> io::Result<File> {
     let path_cstr =
@@ -442,5 +517,101 @@ mod tests {
     fn translate_linux_seek_whence_rejects_unknown() {
         let err = translate_linux_seek_whence(99).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    }
+
+    /// macOS-only fallocate emulation tests. They exercise the real
+    /// syscall sequence against a tmpfile, not a mock — anything else
+    /// would have missed the `F_PEOFPOSMODE` / `fst_offset` interaction
+    /// that broke production. Linux uses native fallocate so these are
+    /// macOS-gated.
+    #[cfg(target_os = "macos")]
+    mod fallocate {
+        use super::*;
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+
+        fn tempfile_with(bytes: &[u8]) -> std::fs::File {
+            let mut f = tempfile::tempfile().expect("tempfile");
+            if !bytes.is_empty() {
+                f.write_all(bytes).unwrap();
+                f.flush().unwrap();
+            }
+            f
+        }
+
+        fn size_of(f: &std::fs::File) -> u64 {
+            f.metadata().unwrap().len()
+        }
+
+        #[test]
+        fn fallocate_grows_empty_file() {
+            // Regression: original implementation passed FUSE offset=0 with
+            // F_PEOFPOSMODE which actually worked, but the `ftruncate(offset+length)`
+            // call relied on F_PREALLOCATE not failing first. The new code
+            // skips straight to ftruncate via the helper.
+            let f = tempfile_with(&[]);
+            macos_emulate_fallocate(f.as_raw_fd(), 0, 0, 1024).unwrap();
+            assert_eq!(size_of(&f), 1024);
+        }
+
+        #[test]
+        fn fallocate_grows_at_nonzero_offset() {
+            // The real bug: a non-zero offset combined with F_PEOFPOSMODE
+            // returns EINVAL on Darwin, because F_PEOFPOSMODE requires
+            // `fst_offset == 0`. qemu-img convert hits this path because
+            // it allocates ranges past the qcow2 header. If this test fails,
+            // every disk-image conversion onto virtio-fs will abort with
+            // "error while writing at byte 0: Invalid argument".
+            let f = tempfile_with(&[]);
+            macos_emulate_fallocate(f.as_raw_fd(), 0, 4096, 8192).unwrap();
+            assert_eq!(size_of(&f), 4096 + 8192);
+        }
+
+        #[test]
+        fn fallocate_does_not_shrink_when_target_smaller() {
+            // Linux fallocate(mode=0) explicitly leaves the file size
+            // alone when offset+length <= current size. A naive
+            // `ftruncate(offset+length)` would shrink the file and
+            // throw away data. This test pins that we don't.
+            let f = tempfile_with(&[0xAB; 10_000]);
+            assert_eq!(size_of(&f), 10_000);
+            macos_emulate_fallocate(f.as_raw_fd(), 0, 0, 4096).unwrap();
+            assert_eq!(size_of(&f), 10_000);
+        }
+
+        #[test]
+        fn fallocate_extends_only_to_target() {
+            // Edge case: target size partially overlaps existing file.
+            // Existing 2000 bytes + offset 1500 + length 1000 = target 2500.
+            // We must extend to 2500, not truncate to 1500 and re-extend.
+            let f = tempfile_with(&[0xAB; 2000]);
+            macos_emulate_fallocate(f.as_raw_fd(), 0, 1500, 1000).unwrap();
+            assert_eq!(size_of(&f), 2500);
+        }
+
+        #[test]
+        fn fallocate_rejects_nonzero_mode_with_eopnotsupp() {
+            // FUSE clients probe with FALLOC_FL_PUNCH_HOLE / KEEP_SIZE /
+            // ZERO_RANGE. We don't implement them; returning EOPNOTSUPP
+            // is the contract that lets the guest fall back to writes.
+            // The errno_to_linux table separately verifies that
+            // EOPNOTSUPP=102 maps to Linux 95 (not 102=ENETRESET).
+            let f = tempfile_with(&[]);
+            for mode in [1u32, 2, 3, 8, 16] {
+                let err = macos_emulate_fallocate(f.as_raw_fd(), mode, 0, 1024).unwrap_err();
+                assert_eq!(
+                    err.raw_os_error(),
+                    Some(libc::EOPNOTSUPP),
+                    "mode {mode} must reject with EOPNOTSUPP"
+                );
+            }
+        }
+
+        #[test]
+        fn fallocate_zero_length_is_noop() {
+            let f = tempfile_with(&[0xAB; 100]);
+            macos_emulate_fallocate(f.as_raw_fd(), 0, 0, 0).unwrap();
+            assert_eq!(size_of(&f), 100);
+        }
     }
 }
