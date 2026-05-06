@@ -70,6 +70,48 @@ pub fn translate_linux_open_flags(linux_flags: i32) -> i32 {
     linux_flags
 }
 
+/// FUSE wire `whence` values for `lseek` (Linux numbering).
+///
+/// The FUSE protocol always uses Linux's numeric values, regardless of the
+/// host platform. macOS and Linux agree on `SEEK_SET`/`SEEK_CUR`/`SEEK_END`
+/// (0/1/2) but the values for `SEEK_DATA` and `SEEK_HOLE` are swapped:
+///
+/// |               | Linux | macOS |
+/// |---------------|-------|-------|
+/// | `SEEK_DATA`   | 3     | 4     |
+/// | `SEEK_HOLE`   | 4     | 3     |
+///
+/// Passing the FUSE-wire value straight to `libc::lseek(2)` on macOS makes
+/// the kernel interpret "find next data" as "find next hole" and vice versa,
+/// which causes consumers like `qemu-img convert` and `cp --sparse=auto` to
+/// see real files as one big hole and copy zeros.
+pub const LINUX_SEEK_SET: i32 = 0;
+pub const LINUX_SEEK_CUR: i32 = 1;
+pub const LINUX_SEEK_END: i32 = 2;
+pub const LINUX_SEEK_DATA: i32 = 3;
+pub const LINUX_SEEK_HOLE: i32 = 4;
+
+/// Translate a FUSE-wire `whence` value (Linux numbering) to the native
+/// `whence` value for `libc::lseek(2)` on the host.
+#[cfg(target_os = "macos")]
+pub fn translate_linux_seek_whence(linux_whence: i32) -> io::Result<i32> {
+    match linux_whence {
+        LINUX_SEEK_SET => Ok(libc::SEEK_SET),
+        LINUX_SEEK_CUR => Ok(libc::SEEK_CUR),
+        LINUX_SEEK_END => Ok(libc::SEEK_END),
+        LINUX_SEEK_DATA => Ok(libc::SEEK_DATA),
+        LINUX_SEEK_HOLE => Ok(libc::SEEK_HOLE),
+        _ => Err(einval()),
+    }
+}
+
+/// On Linux the FUSE-wire value is already native.
+#[cfg(target_os = "linux")]
+#[inline]
+pub fn translate_linux_seek_whence(linux_whence: i32) -> io::Result<i32> {
+    Ok(linux_whence)
+}
+
 /// Safe wrapper around libc::openat().
 pub fn openat(dir_fd: &impl AsRawFd, path: &str, flags: libc::c_int) -> io::Result<File> {
     let path_cstr =
@@ -331,4 +373,74 @@ pub fn relative_path<'a>(path: &'a CStr, prefix: &CStr) -> io::Result<&'a CStr> 
     // Must succeed: Was a `CStr` before, converted to `&[u8]` via `to_bytes_with_nul()`, so must
     // still contain exactly one NUL byte at the end of the slice
     Ok(CStr::from_bytes_with_nul(relative_path).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seek_whence_constants_match_linux_abi() {
+        // FUSE wire values are fixed by the Linux kernel ABI. If these
+        // constants ever drift, every guest's lseek will silently break.
+        assert_eq!(LINUX_SEEK_SET, 0);
+        assert_eq!(LINUX_SEEK_CUR, 1);
+        assert_eq!(LINUX_SEEK_END, 2);
+        assert_eq!(LINUX_SEEK_DATA, 3);
+        assert_eq!(LINUX_SEEK_HOLE, 4);
+    }
+
+    #[test]
+    fn translate_linux_seek_whence_basic_modes() {
+        // 0/1/2 are identical on Linux and macOS, so they round-trip on both
+        // platforms without surprises.
+        assert_eq!(
+            translate_linux_seek_whence(LINUX_SEEK_SET).unwrap(),
+            libc::SEEK_SET
+        );
+        assert_eq!(
+            translate_linux_seek_whence(LINUX_SEEK_CUR).unwrap(),
+            libc::SEEK_CUR
+        );
+        assert_eq!(
+            translate_linux_seek_whence(LINUX_SEEK_END).unwrap(),
+            libc::SEEK_END
+        );
+    }
+
+    #[test]
+    fn translate_linux_seek_whence_data_and_hole() {
+        // The whole point of the helper: SEEK_DATA/SEEK_HOLE must come out
+        // as the host's native libc value, not the wire value. On macOS
+        // these are swapped (Linux 3/4 vs macOS 4/3); on Linux it's a
+        // pass-through. Either way, the wire value `LINUX_SEEK_DATA` must
+        // map to `libc::SEEK_DATA` and `LINUX_SEEK_HOLE` to `libc::SEEK_HOLE`.
+        assert_eq!(
+            translate_linux_seek_whence(LINUX_SEEK_DATA).unwrap(),
+            libc::SEEK_DATA
+        );
+        assert_eq!(
+            translate_linux_seek_whence(LINUX_SEEK_HOLE).unwrap(),
+            libc::SEEK_HOLE
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn translate_linux_seek_whence_actually_swaps_on_macos() {
+        // Belt-and-braces: explicitly assert the numeric swap that was the
+        // original bug. If this ever fails, either macOS changed its ABI
+        // (extraordinarily unlikely) or someone "simplified" the translator
+        // to a pass-through. Both outcomes silently corrupt qemu-img output.
+        assert_eq!(libc::SEEK_HOLE, 3);
+        assert_eq!(libc::SEEK_DATA, 4);
+        assert_eq!(translate_linux_seek_whence(LINUX_SEEK_DATA).unwrap(), 4);
+        assert_eq!(translate_linux_seek_whence(LINUX_SEEK_HOLE).unwrap(), 3);
+    }
+
+    #[test]
+    fn translate_linux_seek_whence_rejects_unknown() {
+        let err = translate_linux_seek_whence(99).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    }
 }

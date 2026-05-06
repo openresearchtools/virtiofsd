@@ -29,7 +29,7 @@ use crate::passthrough::inode_store::{
 };
 use crate::passthrough::util::{
     ebadf, is_safe_inode, openat, openat_verbose, reopen_fd_through_proc,
-    translate_linux_open_flags,
+    translate_linux_open_flags, translate_linux_seek_whence,
 };
 #[cfg(target_os = "macos")]
 use crate::passthrough::util::get_path_by_fd;
@@ -2766,8 +2766,14 @@ impl FileSystem for PassthroughFs {
 
         let fd = data.file.get()?.write().unwrap().as_raw_fd();
 
+        // The FUSE wire protocol uses Linux's `whence` values; on macOS
+        // SEEK_DATA and SEEK_HOLE have different numeric values and must be
+        // translated, otherwise sparse-aware tools (qemu-img, cp) see real
+        // files as one big hole and copy zeros.
+        let native_whence = translate_linux_seek_whence(whence as i32)?;
+
         // Safe because this doesn't modify any memory and we check the return value.
-        let res = unsafe { libc::lseek(fd, offset as libc::off64_t, whence as libc::c_int) };
+        let res = unsafe { libc::lseek(fd, offset as libc::off64_t, native_whence) };
         if res < 0 {
             Err(io::Error::last_os_error())
         } else {
