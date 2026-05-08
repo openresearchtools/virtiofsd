@@ -1,0 +1,46 @@
+name: Build macOS virtiofsd
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-macos.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "NOTICE.md"
+      - "scripts/package-macos-artifact.sh"
+      - "src/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build macOS arm64 binary
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package artifact
+        run: scripts/package-macos-artifact.sh target/release/virtiofsd "$RUNNER_TEMP/virtiofsd-macos"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtiofsd-macos-arm64
+          path: ${{ runner.temp }}/virtiofsd-macos
+          if-no-files-found: error
