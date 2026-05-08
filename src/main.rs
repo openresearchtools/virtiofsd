@@ -205,7 +205,8 @@ struct Opt {
     /// not only helpful with resources, but may also be important in cases where virtiofsd should
     /// only have file descriptors open for files that are open in the guest, e.g. to get around
     /// bad interactions with NFS's silly renaming.
-    #[arg(long, require_equals = true, default_value = "prefer")]
+    #[cfg_attr(target_os = "macos", arg(long, require_equals = true, default_value = "never"))]
+    #[cfg_attr(not(target_os = "macos"), arg(long, require_equals = true, default_value = "prefer"))]
     inode_file_handles: InodeFileHandlesCommandLineMode,
 
     /// The caching policy the file system should use (auto, always, never, metadata)
